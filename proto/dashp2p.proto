@@ -1,0 +1,22 @@
+syntax = "proto3";
+
+message Ping {
+  int32 sec_number = 1;
+}
+
+message Pong {
+  int32 sec_number = 1;
+}
+
+message Fragment {
+  string url = 1;
+  bytes data = 2;
+}
+
+message P2PMessage {
+  oneof msg {
+    Ping ping = 1;
+    Pong pong = 2;
+    Fragment fragment = 3;
+  }
+}

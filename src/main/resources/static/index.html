@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Shaka + P2P DASH</title>
+    <link rel="icon" href="data:,">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.3.5/shaka-player.compiled.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="peer.js"></script>
+    <script src="ktor/peer.js"></script>
+    <style>
+        body { font-family: Arial; margin: 20px; }
+        video { width: 100%; max-width: 720px; }
+        .section { margin-bottom: 20px; }
+        table { border-collapse: collapse; width: 100%; }
+        th, td { border: 1px solid #ccc; padding: 6px; }
+    </style>
+</head>
+<body>
+
+<h2>Tu ID: <span id="my-id">Cargando...</span></h2>
+
+<div class="section">
+    <div id="connected-peers">Peers conectados: ninguno</div>
+</div>
+
+<div class="section">
+    <button onclick="clearCache()">🗑️ Borrar caché de fragmentos</button>
+    <span id="cache-status" style="margin-left: 10px;"></span>
+</div>
+
+<video id="video" controls></video>
+
+<div class="section">
+    <h3>📈 Segmentos recibidos</h3>
+    <canvas id="chart" width="600" height="200"></canvas>
+    <table id="log-table">
+        <thead>
+        <tr>
+            <th>URL</th>
+            <th>Origen</th>
+            <th>Peer</th>
+            <th>Tiempo (ms)</th>
+            <th>Primero</th>
+        </tr>
+        </thead>
+        <tbody></tbody>
+    </table>
+</div>
+
+<script>
+    const manifestUri = '/ktor/hero/hero.mpd';
+    let chart;
+    let fragmentLog = [];
+    let stats = { peer: 0, http: 0 };
+
+    navigator.serviceWorker.addEventListener('message', async (event) => {
+        const data = event.data;
+
+        if (data.type === 'fragment') {
+            checkCacheStatus();
+            addFragmentToLog({
+                url: data.url,
+                source: data.source === 'peer' ? 'peer' : 'http',
+                peerId: data.peerId || null
+            });
+        }
+    });
+
+    function addFragmentToLog({ url, source, peerId }) {
+        const now = performance.now();
+        const existing = fragmentLog.find(e => e.url === url);
+        const isDuplicate = !!existing;
+        const entry = {
+            url,
+            source,
+            peerId,
+            timestamp: now,
+            first: !isDuplicate
+        };
+        fragmentLog.push(entry);
+        const tbody = document.querySelector('#log-table tbody');
+        const tr = document.createElement('tr');
+        tr.innerHTML = `
+      <td>${url}</td>
+      <td>${source}</td>
+      <td>${peerId || '-'}</td>
+      <td>${now.toFixed(1)} ms</td>
+      <td>${entry.first ? '✅' : '—'}</td>
+    `;
+        if (!entry.first) {
+            tr.style.opacity = '0.5';
+            tr.style.fontStyle = 'italic';
+        }
+        tbody.prepend(tr);
+        stats[source]++;
+        chart.data.datasets[0].data = [stats.peer, stats.http];
+        chart.update();
+    }
+
+    function initChart() {
+        const ctx = document.getElementById('chart').getContext('2d');
+        chart = new Chart(ctx, {
+            type: 'bar',
+            data: {
+                labels: ['P2P', 'Servidor'],
+                datasets: [{
+                    label: 'Fragmentos recibidos',
+                    data: [0, 0],
+                    backgroundColor: ['#4caf50', '#2196f3']
+                }]
+            },
+            options: {
+                responsive: false,
+                plugins: { legend: { display: false } },
+                scales: { y: { beginAtZero: true } }
+            }
+        });
+    }
+
+    async function initPlayer() {
+        if ('serviceWorker' in navigator) {
+            const reg = await navigator.serviceWorker.register('/sw.js');
+            if (!navigator.serviceWorker.controller) location.reload();
+        }
+        initChart();
+        shaka.polyfill.installAll();
+        if (!shaka.Player.isBrowserSupported()) return;
+        const video = document.getElementById('video');
+        const player = new shaka.Player(video);
+        await player.load(manifestUri);
+    }
+
+    window.addEventListener('load', initPlayer);
+
+    async function clearCache() {
+        const result = await caches.delete('video-fragments');
+        const status = document.getElementById('cache-status');
+        if (result) {
+            status.textContent = '✅ Caché eliminada';
+            console.log('🗑️ Caché "video-fragments" eliminada');
+        } else {
+            status.textContent = '⚠️ Caché no encontrada';
+            console.warn('⚠️ No se pudo eliminar la caché (¿no existe?)');
+        }
+        document.querySelector('#log-table tbody').innerHTML = '';
+        if (chart) {
+            stats.peer = 0;
+            stats.http = 0;
+            chart.data.datasets[0].data = [0, 0];
+            chart.update();
+        }
+        fragmentLog = [];
+    }
+
+    async function checkCacheStatus() {
+        const cache = await caches.open('video-fragments');
+        const requests = await cache.keys();
+        const status = document.getElementById('cache-status');
+        if (requests.length > 0) {
+            status.textContent = '';
+        }
+    }
+    function refreshLocalInventory() {
+        const display = document.getElementById('local-inventory-display');
+        display.textContent = Array.from(localInventory).sort().join('\n') || '(vacío)';
+    }
+    function refreshPeerInventory() {
+        const display = document.getElementById('peer-inventory-display');
+        const inventory = window.peerInventory || {};
+
+        let output = '';
+        for (const peerId in inventory) {
+            const urls = Array.from(inventory[peerId] || []);
+            output += `🔗 ${peerId}:\n${urls.map(url => `  - ${url}`).join('\n')}\n\n`;
+        }
+
+        display.textContent = output || '(vacío)';
+    }
+
+</script>
+<div class="section">
+    <h3>🗂️ Inventario local</h3>
+    <button onclick="refreshLocalInventory()">🔄 Recargar</button>
+    <pre id="local-inventory-display" style="background:#f9f9f9; padding:10px; border:1px solid #ccc; max-height:200px; overflow:auto;"></pre>
+</div>
+<div class="section">
+    <h3>🌐 Inventario de peers</h3>
+    <button onclick="refreshPeerInventory()">🔄 Recargar</button>
+    <pre id="peer-inventory-display" style="background:#f0f0f0; padding:10px; border:1px solid #ccc; max-height:300px; overflow:auto;"></pre>
+</div>
+
+
+</body>
+</html>
