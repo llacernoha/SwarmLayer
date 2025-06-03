@@ -1,17 +1,33 @@
 (function () {
+    const GOOGLE_PROTOBUF_URL = 'https://unpkg.com/google-protobuf@latest/google-protobuf.js';
+    const SWARM_LAYER_PB_URL = 'https://dashp2p.infinitebuffer.com/ktor/swarmLayer_pb.js';
     const PEERJS_URL = 'https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js';
-    const PROTOBUF_URL = 'https://unpkg.com/protobufjs/dist/protobuf.min.js';
 
-    if (typeof protobuf === 'undefined') {
+    // Paso 1: Cargar google-protobuf
+    if (typeof jspb === 'undefined') {
         const script = document.createElement('script');
-        script.src = PROTOBUF_URL;
-        script.onload = () => loadPeerJS();
-        script.onerror = () => console.error('Error cargando protobuf.js');
+        script.src = GOOGLE_PROTOBUF_URL;
+        script.onload = () => loadSwarmLayerPB();
+        script.onerror = () => console.error('Error cargando google-protobuf.js');
         document.head.appendChild(script);
     } else {
-        loadPeerJS();
+        loadSwarmLayerPB();
     }
 
+    // Paso 2: Cargar swarmLayer_pb.js (tu archivo generado)
+    function loadSwarmLayerPB() {
+        if (typeof proto === 'undefined') {
+            const script = document.createElement('script');
+            script.src = SWARM_LAYER_PB_URL;
+            script.onload = () => loadPeerJS();
+            script.onerror = () => console.error('Error cargando swarmLayer_pb.js');
+            document.head.appendChild(script);
+        } else {
+            loadPeerJS();
+        }
+    }
+
+    // Paso 3: Cargar PeerJS
     function loadPeerJS() {
         if (typeof Peer === 'undefined') {
             const script = document.createElement('script');
@@ -25,19 +41,19 @@
     }
 
 
-    function initP2P() {
-        const protoRoot = protobuf.Root.fromJSON({
-            nested: {
-                FragmentMessage: {
-                    fields: {
-                        url: { type: "string", id: 1 },
-                        buffer: { type: "bytes", id: 2 }
-                    }
-                }
-            }
-        });
-        const FragmentMessage = protoRoot.lookupType("FragmentMessage");
-        console.log('📦 Esquema Protobuf cargado: FragmentMessage listo');
+    async function initP2P() {
+        if ('serviceWorker' in navigator) {
+            const reg = await navigator.serviceWorker.register('/sw.js');
+            if (!navigator.serviceWorker.controller) location.reload();
+        }
+        const {
+            ping,
+            pong,
+            fragment,
+            fragmentRequest,
+            inventory,
+            swarmLayerMessage
+        } = proto;
 
         let peer;
         let keepAliveInterval;
@@ -83,7 +99,7 @@
             });
 
             peer.on('close', () => {
-                console.warn('❌ Peer cerrado. Creando uno nuevo...');
+                console.warn('Peer cerrado. Creando uno nuevo...');
                 unregisterPeer(peer.id);
                 clearInterval(keepAliveInterval);
                 setupPeer(new Peer(getPeerConfig()));
@@ -98,8 +114,12 @@
                 secure: true,
                 config: {
                     iceServers: [
-                        { urls: 'turn:dashp2p.infinitebuffer.com:3478?transport=udp', username: 'user1', credential: 'as9df7ng34nj' },
-                        { urls: 'stun:dashp2p.infinitebuffer.com:3478' }
+                        {
+                            urls: 'turn:dashp2p.infinitebuffer.com:3478?transport=udp',
+                            username: 'user1',
+                            credential: 'as9df7ng34nj'
+                        },
+                        {urls: 'stun:dashp2p.infinitebuffer.com:3478'}
                     ],
                     iceTransportPolicy: 'all'
                 }
@@ -109,7 +129,13 @@
         function startHeartbeat(conn, remoteId) {
             heartbeatIntervals[remoteId] = setInterval(() => {
                 if (conn.open) {
-                    conn.send({ type: 'ping' });
+                    ///
+                    const pingMsg = new proto.ping();
+                    pingMsg.setSecnumber(1);
+                    const wrapper = new proto.swarmLayerMessage();
+                    wrapper.setPing(pingMsg);
+                    conn.send(wrapper.serializeBinary());
+                    ///
 
                     heartbeatTimeouts[remoteId] = setTimeout(() => {
                         conn.close();
@@ -122,8 +148,28 @@
             }, 10000);
 
             conn.on('data', data => {
-                if (data.type === 'ping') conn.send({ type: 'pong' });
-                if (data.type === 'pong') clearTimeout(heartbeatTimeouts[remoteId]);
+                try {
+                    const msg = proto.swarmLayerMessage.deserializeBinary(data);
+                    const type = msg.getMsgCase();
+
+                    if (type === proto.swarmLayerMessage.MsgCase.PING) {
+                        // Responder con PONG
+                        const pongMsg = new proto.pong();
+                        pongMsg.setSecnumber(msg.getPing().getSecnumber());
+
+                        const wrapper = new proto.swarmLayerMessage();
+                        wrapper.setPong(pongMsg);
+
+                        conn.send(wrapper.serializeBinary());
+                    }
+
+                    if (type === proto.swarmLayerMessage.MsgCase.PONG) {
+                        clearTimeout(heartbeatTimeouts[remoteId]);
+                    }
+
+                } catch (err) {
+                    console.warn("❌ Error al decodificar mensaje Protobuf:", err);
+                }
             });
 
             conn.on('close', () => {
@@ -139,47 +185,85 @@
                 connections[remoteId] = conn;
                 updatePeers();
                 startHeartbeat(conn, remoteId);
-                conn.send({ type: 'inventory', urls: Array.from(localInventory) });
+
+                const inv = new proto.inventory();
+                inv.setUrlsList(Array.from(localInventory)); // esto acepta un array de strings
+
+                const wrapper = new proto.swarmLayerMessage();
+                wrapper.setInventory(inv);
+
+                conn.send(wrapper.serializeBinary());
 
 
 
                 conn.on('data', async data => {
-                    if (data?.constructor?.name === 'Uint8Array' || data instanceof ArrayBuffer) {
-                        try {
-                            const decoded = FragmentMessage.decode(new Uint8Array(data));
+                    try {
+                        const msg = proto.swarmLayerMessage.deserializeBinary(data);
+                        const type = msg.getMsgCase();
+
+                        if (type === proto.swarmLayerMessage.MsgCase.FRAGMENT) {
+                            const frag = msg.getFragment();
+                            const url = frag.getUrl();
+                            const buffer = frag.getData_asU8();
+
                             console.log(`📥 Fragmento recibido de peer ${remoteId}`);
-                            console.log(`🔓 Decodificado Protobuf: ${decoded.url} (${decoded.buffer.byteLength} bytes)`);
+                            console.log(`🔓 Decodificado Protobuf: ${url} (${buffer.byteLength} bytes)`);
+
                             navigator.serviceWorker.controller?.postMessage({
                                 type: 'fragment',
-                                url: decoded.url,
-                                buffer: decoded.buffer,
+                                url,
+                                buffer,
                                 source: 'peer',
                                 peerId: remoteId
                             });
-                            localInventory.add(decoded.url);
-                        } catch (err) {
-                            console.warn("❌ Error al decodificar Protobuf:", err);
+
+                            localInventory.add(url);
                         }
-                    } else if (data.type === 'inventory') {
-                        peerInventory[remoteId] = new Set(data.urls);
-                    } else if (data.type === 'fragment-request') {
-                        if (localInventory.has(data.url)) {
-                            const cache = await caches.open('video-fragments');
-                            const res = await cache.match(data.url);
-                            if (res) {
-                                const buffer = await res.arrayBuffer();
-                                const encoded = FragmentMessage.encode({
-                                    url: data.url,
-                                    buffer: new Uint8Array(buffer)
-                                }).finish();
-                                conn.send(encoded);
 
+                        else if (type === proto.swarmLayerMessage.MsgCase.INVENTORY) {
+                            const urls = msg.getInventory().getUrlsList();
+                            peerInventory[remoteId] = new Set(urls);
+                        }
 
+                        else if (type === proto.swarmLayerMessage.MsgCase.FRAGMENTREQUEST) {
+                            const requestedUrl = msg.getFragmentrequest().getUrl();
 
-                                //const buffer = await res.arrayBuffer();
-                                //conn.send({ type: 'fragment', url: data.url, buffer });
+                            if (localInventory.has(requestedUrl)) {
+                                const cache = await caches.open('video-fragments');
+                                const res = await cache.match(requestedUrl);
+                                if (res) {
+                                    const buffer = await res.arrayBuffer();
+
+                                    const frag = new proto.fragment();
+                                    frag.setUrl(requestedUrl);
+                                    frag.setData(new Uint8Array(buffer));
+
+                                    const wrapper = new proto.swarmLayerMessage();
+                                    wrapper.setFragment(frag);
+
+                                    conn.send(wrapper.serializeBinary());
+                                }
                             }
                         }
+
+                        else if (type === proto.swarmLayerMessage.MsgCase.PING) {
+                            const pingNum = msg.getPing().getSecnumber();
+
+                            const pongMsg = new proto.pong();
+                            pongMsg.setSecnumber(pingNum);
+
+                            const response = new proto.swarmLayerMessage();
+                            response.setPong(pongMsg);
+
+                            conn.send(response.serializeBinary());
+                        }
+
+                        else if (type === proto.swarmLayerMessage.MsgCase.PONG) {
+                            clearTimeout(heartbeatTimeouts[remoteId]);
+                        }
+
+                    } catch (err) {
+                        console.warn("❌ Error al decodificar Protobuf:", err);
                     }
                 });
             });
@@ -219,25 +303,25 @@
         function registerPeer(id) {
             return fetch(registerUrl, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id })
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id})
             }).then(res => res.json());
         }
 
         function unregisterPeer(id) {
             return fetch(unRegisterUrl, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id })
-            }).catch(err => console.warn('❌ Unregister error:', err));
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id})
+            }).catch(err => console.warn('Unregister error:', err));
         }
 
         function sendKeepAlive(id) {
             fetch(keepAliveUrl, {
                 method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ id })
-            }).catch(err => console.warn('❌ Keep-alive failed:', err));
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({id})
+            }).catch(err => console.warn('Keep-alive failed:', err));
         }
 
         navigator.serviceWorker?.addEventListener('message', (event) => {
@@ -251,7 +335,14 @@
                     const randomPeer = peersWithIt[Math.floor(Math.random() * peersWithIt.length)];
                     const conn = connections[randomPeer];
                     if (conn?.open) {
-                        conn.send({ type: 'fragment-request', url: data.url });
+                        const req = new proto.fragmentRequest();
+                        req.setUrl(data.url);
+
+                        const wrapper = new proto.swarmLayerMessage();
+                        wrapper.setFragmentrequest(req);
+
+                        conn.send(wrapper.serializeBinary());
+
                     }
                 } else {
                     navigator.serviceWorker.controller?.postMessage({
@@ -264,20 +355,21 @@
             if (data.type === 'fragment') {
                 localInventory.add(data.url);
                 for (const peerId in connections) {
-                    connections[peerId].send({
-                        type: 'inventory',
-                        urls: Array.from(localInventory)
-                    });
+                    const inv = new proto.inventory();
+                    inv.setUrlsList(Array.from(localInventory));
+
+                    const wrapper = new proto.swarmLayerMessage();
+                    wrapper.setInventory(inv);
+
+                    connections[peerId].send(wrapper.serializeBinary());
+
                 }
             }
         });
 
 
-
         // Comenzar
         setupPeer(new Peer(getPeerConfig()));
-
-
 
 
     }

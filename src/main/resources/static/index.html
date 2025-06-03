@@ -120,10 +120,7 @@
     }
 
     async function initPlayer() {
-        if ('serviceWorker' in navigator) {
-            const reg = await navigator.serviceWorker.register('/sw.js');
-            if (!navigator.serviceWorker.controller) location.reload();
-        }
+
         initChart();
         shaka.polyfill.installAll();
         if (!shaka.Player.isBrowserSupported()) return;

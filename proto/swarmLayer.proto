@@ -1,0 +1,31 @@
+syntax = "proto3";
+
+message ping {
+  int32 secNumber = 1;
+}
+
+message pong {
+  int32 secNumber = 1;
+}
+
+message fragment {
+  string url = 1;
+  bytes data = 2;
+}
+message fragmentRequest {
+  string url = 1;
+}
+message inventory {
+  repeated string urls = 1;
+}
+
+
+message swarmLayerMessage {
+  oneof msg {
+    ping ping = 1;
+    pong pong = 2;
+    fragment fragment = 3;
+    fragmentRequest fragmentRequest = 4;
+    inventory inventory = 5;
+  }
+}
