@@ -1,0 +1,111 @@
+function analyze_logs(folder)
+    % ANALYZE_LOGS - Analiza logs de fragmentos descargados por P2P y HTTP
+    %
+    % USO:
+    %   analyze_logs('C:\ruta\a\los\logs')
+    %   o simplemente analyze_logs si el script y los archivos están en la misma carpeta
+
+    if nargin == 0
+        folder = fileparts(mfilename('fullpath')); % carpeta del script
+    end
+
+    %% Leer archivos JSON
+    files = dir(fullfile(folder, 'fragment-logs-*.json'));
+    if isempty(files)
+        error('No se encontraron archivos fragment-logs-*.json en la carpeta.');
+    end
+
+    allLogs = [];
+    for k = 1:length(files)
+        raw = fileread(fullfile(folder, files(k).name));
+        logs = jsondecode(raw);
+        allLogs = [allLogs; logs(:)];
+    end
+
+    %% Convertir timestamps
+    timestamps = datetime({allLogs.timestamp}, ...
+        'InputFormat', 'yyyy-MM-dd''T''HH:mm:ss.SSS''Z''', 'TimeZone', 'UTC');
+    [timestamps, idx] = sort(timestamps);
+    allLogs = allLogs(idx);
+
+    %% Crear segmentos de 20 segundos
+    tStart = min(timestamps);
+    tEnd = max(timestamps);
+    edges = tStart:seconds(20):tEnd;
+    nBins = length(edges) - 1;
+
+    http_bytes = zeros(1, nBins);
+    p2p_bytes = zeros(1, nBins);
+
+    %% Acumular tráfico
+    for i = 1:numel(allLogs)
+        ts = datetime(allLogs(i).timestamp, ...
+            'InputFormat', 'yyyy-MM-dd''T''HH:mm:ss.SSS''Z''', 'TimeZone', 'UTC');
+        bin = find(ts >= edges(1:end-1) & ts < edges(2:end));
+        if isempty(bin), continue; end
+
+        bytes = allLogs(i).bytes;
+        if ischar(bytes), bytes = str2double(bytes); end
+
+        if strcmpi(allLogs(i).source, 'http')
+            http_bytes(bin) = http_bytes(bin) + bytes;
+        elseif strcmpi(allLogs(i).source, 'peer')
+            p2p_bytes(bin) = p2p_bytes(bin) + bytes;
+        end
+    end
+
+    %% Contar nodos activos desde segmento 4 en adelante
+    nodoSegments = containers.Map();
+    for i = 1:numel(allLogs)
+        if ~isfield(allLogs(i), 'peerId') || isempty(allLogs(i).peerId), continue; end
+        nodo = allLogs(i).peerId;
+        ts = datetime(allLogs(i).timestamp, ...
+            'InputFormat', 'yyyy-MM-dd''T''HH:mm:ss.SSS''Z''', 'TimeZone', 'UTC');
+        bin = find(ts >= edges(1:end-1) & ts < edges(2:end));
+        if isempty(bin), continue; end
+        if isKey(nodoSegments, nodo)
+            nodoSegments(nodo) = [nodoSegments(nodo), bin];
+        else
+            nodoSegments(nodo) = bin;
+        end
+    end
+
+    nodos_activos = zeros(1, nBins);
+    keysList = keys(nodoSegments);
+    for i = 1:length(keysList)
+        segs = unique(nodoSegments(keysList{i}));
+        segs_eligible = segs(segs >= 4);
+        if isempty(segs_eligible), continue; end
+        seg_start = min(segs_eligible);
+        seg_end = max(segs);
+        nodos_activos(seg_start:seg_end) = nodos_activos(seg_start:seg_end) + 1;
+    end
+
+    %% Mostrar duración total
+    fprintf('Duración de recepción: %.1f segundos\n', seconds(tEnd - tStart));
+
+    %% Gráfica combinada con líneas
+    figure('Name','Tráfico y Nodos activos','NumberTitle','off');
+
+    yyaxis left
+    p1 = plot(edges(1:end-1), http_bytes, '-', 'LineWidth', 1.5);
+    hold on;
+    p2 = plot(edges(1:end-1), p2p_bytes, '-', 'LineWidth', 1.5);
+    ylabel('Bytes por 20s');
+    xtickformat('HH:mm:ss');
+    grid on;
+
+    % Colores personalizados
+    p1.Color = [0.2 0.2 0.9];  % HTTP - azul
+    p2.Color = [0 0.7 0];      % P2P - verde
+
+    yyaxis right
+    p3 = plot(edges(1:end-1), nodos_activos, '-', ...
+        'LineWidth', 1.5, 'Color', [1 0.5 0]); % naranja
+    ylabel('Nodos descargando contenido');
+    ylim([0 max(nodos_activos)+1]);
+    yticks(0:1:max(nodos_activos)+1);
+
+    legend([p1, p2, p3], {'HTTP', 'P2P', 'Nodos'}, 'Location', 'northwest');
+    title('Tráfico total (HTTP + P2P) y Nodos descargando');
+end
