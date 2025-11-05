@@ -1,200 +1,180 @@
 const CACHE_NAME = 'video-fragments';
-const peerInventory = new Map();          // { peerId → Set(urls) }
-const fragmentWaiters = new Map();        // Promesas esperando fragmentos
-let ownPeerId = null;
+const peerInventory = new Map();
+let peer_id = null;
+const pendingFragments = new Map();
 
-self.addEventListener('install', () => self.skipWaiting());
-self.addEventListener('activate', e => e.waitUntil(self.clients.claim()));
+self.addEventListener('install', (event) => {
+    self.skipWaiting(); // Forzar activación inmediata
+});
+
+self.addEventListener('activate', (event) => {
+    event.waitUntil((async () => {
+        // Se activa en todas las páginas
+        await self.clients.claim();
+    })());
+});
+
+async function sendMetric(metric) {
+    try {
+        await fetch('https://dashp2p.infinitebuffer.com/ktor/metric', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(metric)
+        });
+    } catch (err) {
+    }
+}
+
+
+// Devuelve nombre fragmentos cacheados
+async function getLocalInventory() {
+    const cache = await caches.open(CACHE_NAME);
+    const requests = await cache.keys();
+    return requests.map(req => req.url);
+}
 
 self.addEventListener('fetch', event => {
+
     const url = event.request.url;
     if (!url.includes('.m4s') && !url.includes('.mp4')) return;
 
     event.respondWith((async () => {
-        const clients = await self.clients.matchAll({ includeUncontrolled: true });
+        const clients = await self.clients.matchAll();
         const cache = await caches.open(CACHE_NAME);
 
         // 1) Cache local
         const fromCache = await cache.match(event.request);
         if (fromCache) {
-            clients.forEach(c =>
-                c.postMessage({ type: 'fragment', url, source: 'cache' })
-            );
             return fromCache;
         }
 
         // 2) Buscar peers que lo tienen
         const peersWith = [];
-        for (const [peerId, urls] of peerInventory.entries()) {
+        peerInventory.forEach((urls, peerId) => {
             if (urls.has(url)) peersWith.push(peerId);
-        }
-        clients.forEach(c =>
-            c.postMessage({
-                type: 'log',
-                message: `Peers con ${url}: ${peersWith.join(', ') || 'ninguno'}`
-            })
-        );
+        });
 
-        // 3) Si hay peers, solicitamos y esperamos hasta 4 s
+        // 3) Si hay peers, solicitamos y esperamos hasta 2 s
         if (peersWith.length > 0) {
             const peerId = peersWith[Math.floor(Math.random() * peersWith.length)];
+
+            // Enviar mensaje a peer.js para que soliciten el fragmento
             clients.forEach(c => {
-                c.postMessage({ type: 'send-fragment-request', url: url, peerId: peerId });
-                c.postMessage({
-                    type: 'log',
-                    message: `Solicitando ${url} a peer ${peerId}`
-                });
+                c.postMessage({ type: 'send-fragment-request', url, peerId });
             });
 
-            const got = await waitFragment(url, 1250);
-            if (got) {
-                const fromPeerCache = await cache.match(event.request);
+            try {
+                // Esperar hasta 2 segundos a que el fragmento llegue a caché
+                await new Promise((resolve, reject) => {
+                    const timer = setTimeout(() => {
+                        pendingFragments.delete(url);
+                        reject();
+                    }, 2000);
 
-                //MÉTRICAS
-                const buffer = await fromPeerCache.clone().arrayBuffer();
-                await caches.open('fragment-logs').then(cache =>
-                    cache.put(
-                        new Request(`log-${Date.now()}-${Math.random().toString(36).slice(2)}`),
-                        new Response(JSON.stringify({
-                            peerId: ownPeerId,
-                            url: url,
-                            source: 'peer',         // cambia a 'http' si aplica
-                            fromPeerId: peerId,   // o null si no aplica
-                            bytes: buffer?.byteLength || 0,
-                            timestamp: new Date().toISOString()
-                        }), {
-                            headers: { 'Content-Type': 'application/json' }
-                        })
-                    )
-                );
+                    pendingFragments.set(url, () => {
+                        clearTimeout(timer);
+                        resolve();
+                    });
+                });
+
+                // Una vez resuelta la promesa, intentar obtener del cache
+                const fragment = await cache.match(event.request);
+                if (fragment) {
 
 
-                if (fromPeerCache) {
-                    clients.forEach(c =>
-                        c.postMessage({ type: 'fragment', url, source: 'peer' })
-                    );
-                    return fromPeerCache;
+                    // Notificar nuevo inventario
+                    const localInventory = await getLocalInventory();
+                    clients.forEach(c => {
+                        c.postMessage({ type: 'send-inventory', urls: localInventory });
+                    });
+
+                    // Obtener tamaño en bytes
+                    const buffer = await fragment.clone().arrayBuffer();
+                    const size = buffer.byteLength;
+                    // Enviar métrica
+                    await sendMetric({
+                        source: 'p2p',
+                        fragmentUrl: url,
+                        timestamp: Date.now(),
+                        senderPeerId: peerId,
+                        receiverPeerId: peer_id,
+                        sizeBytes: size
+                    });
+
+                    return fragment;
                 }
-            } else {
-                clients.forEach(c =>
-                    c.postMessage({
-                        type: 'log',
-                        message: `⏱️ Timeout de 4 s para ${url}, usando HTTP`
-                    })
-                );
+
+            } catch (err) {
+                // Si no llegó en 2 s, se hará el fetch HTTP
             }
         }
-
         // 4) Fallback HTTP
         const resp = await fetch(event.request);
         if (resp.ok) {
             await cache.put(event.request, resp.clone());
-
-            //MÉTRICAS
-            const buffer = await resp.clone().arrayBuffer();
-            await caches.open('fragment-logs').then(cache =>
-                cache.put(
-                    new Request(`log-${Date.now()}-${Math.random().toString(36).slice(2)}`),
-                    new Response(JSON.stringify({
-                        peerId: ownPeerId,
-                        url: url,
-                        source: 'http',
-                        fromPeerId: '',
-                        bytes: buffer?.byteLength || 0,
-                        timestamp: new Date().toISOString()
-                    }), {
-                        headers: { 'Content-Type': 'application/json' }
-                    })
-                )
-            );
-
-
-
-
-            clients.forEach(c => {
-                c.postMessage({ type: 'fragment', url, source: 'http' });
-                c.postMessage({
-                    type: 'log',
-                    message: `Fragmento ${url} recuperado vía HTTP`
-                });
-            });
         }
+
+        // Notificar nuevo inventario
+        const localInventory = await getLocalInventory();
+        clients.forEach(c => {
+            c.postMessage({ type: 'send-inventory', peerId: peer_id, urls: localInventory });
+        });
+
+        // Obtener tamaño en bytes
+        const buffer = await resp.clone().arrayBuffer();
+        const size = buffer.byteLength;
+
+        // Enviar métrica
+        await sendMetric({
+            source: 'http',
+            fragmentUrl: url,
+            timestamp: Date.now(),
+            senderPeerId: '',
+            receiverPeerId: peer_id,
+            sizeBytes: size
+        });
+
         return resp;
     })());
 });
 
 self.addEventListener('message', async event => {
-    const { type, peerId, urls, url, buffer } = event.data;
-    const clients = await self.clients.matchAll({ includeUncontrolled: true });
+    const {type, peerId, url, urls, buffer} = event.data;
 
-    if (type === 'peer-inventory') {
-        peerInventory.set(peerId, new Set(urls));
-        clients.forEach(c =>
-            c.postMessage({
-                type: 'log',
-                message: `Inventario de ${peerId}: ${urls.join(', ')}`
-            })
-        );
+    switch (type) {
+        case 'peerId':
+            peer_id = peerId;
+            break;
+
+        case 'fragment-received':
+            const cache = await caches.open(CACHE_NAME);
+            const exists = await cache.match(url);
+
+            if (!exists) {
+                const headers = new Headers({
+                    'Content-Type': 'application/octet-stream'
+                });
+
+                const response = new Response(buffer, { headers });
+                await cache.put(url, response);
+            }
+
+
+            if (url && pendingFragments.has(url)) {
+                pendingFragments.get(url)(); // resuelve la promesa
+                pendingFragments.delete(url);
+            }
+            break;
+
+        case 'peerInventory':
+            if (peerId && Array.isArray(urls)) {
+                peerInventory.set(peerId, new Set(urls));
+            }
+            break;
+
+        case 'peer-disconnected':
+            peerInventory.delete(peerId);
+            break;
     }
-
-    if (type === 'peer-disconnected') {
-        peerInventory.delete(peerId);
-        clients.forEach(c =>
-            c.postMessage({
-                type: 'log',
-                message: `Peer desconectado: ${peerId}`
-            })
-        );
-    }
-
-    if (type === 'fragment-received') {
-
-        const cache = await caches.open(CACHE_NAME);
-        const exists = await cache.match(url);
-
-        if (!exists) {
-            const headers = new Headers({
-                'Content-Type': 'application/octet-stream'
-            });
-
-            const response = new Response(buffer, { headers });
-            await cache.put(url, response);
-        }
-
-
-        if (fragmentWaiters.has(url)) {
-            fragmentWaiters.get(url)(true);
-            fragmentWaiters.delete(url);
-        }
-    }
-
-    if (type === 'set-own-peer-id') {
-        ownPeerId = peerId;
-        clients.forEach(c =>
-            c.postMessage({
-                type: 'log',
-                message: `🔑 ID propio registrado en SW: ${peerId}`
-            })
-        );
-    }
-
 
 });
-
-/**
- * Espera a 'fragment-received' o a que pasen 'timeout' ms.
- * Resuelve a true si llega el fragmento, a false si expira.
- */
-function waitFragment(url, timeout = 4000) {
-    return new Promise(resolve => {
-        const timer = setTimeout(() => {
-            fragmentWaiters.delete(url);
-            resolve(false);
-        }, timeout);
-
-        fragmentWaiters.set(url, () => {
-            clearTimeout(timer);
-            resolve(true);
-        });
-    });
-}

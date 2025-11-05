@@ -1,166 +1,49 @@
 <!DOCTYPE html>
 <html lang="es">
 <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>SwarmLayer</title>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Shaka Player</title>
     <link rel="icon" href="data:,">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.3.5/shaka-player.compiled.js"></script>
-    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
-    <script src="ktor/peer.js"></script>
-    <style>
-        body { font-family: Arial; margin: 20px; }
-        video { width: 100%; max-width: 720px; }
-        .section { margin-bottom: 20px; }
-        table { border-collapse: collapse; width: 100%; }
-        th, td { border: 1px solid #ccc; padding: 6px; }
-    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.9.2/shaka-player.compiled.js"></script>
+    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+    <script src="swarmLayer_pb.js"></script>
+    <script src="peer.js"></script>
+
 </head>
 <body>
 
-<h2>Tu ID: <span id="my-id">Cargando...</span></h2>
 
-<div class="section">
-    <div id="connected-peers">Peers conectados: ninguno</div>
-</div>
+<div>Mi ID: <span id="my-id">cargando...</span></div>
 
-<div class="section">
-    <button onclick="clearCache()">Borrar caché de fragmentos</button>
-    <span id="cache-status" style="margin-left: 10px;"></span>
-</div>
+<video id="video" width="640" controls autoplay></video>
 
-<video id="video" controls></video>
 
-<div class="section">
-    <h3>📈 Segmentos recibidos</h3>
-    <canvas id="chart" width="600" height="200"></canvas>
-    <table id="log-table">
-        <thead>
-        <tr>
-            <th>URL</th>
-            <th>Origen</th>
-            <th>Peer</th>
-            <th>Tiempo (ms)</th>
-            <th>Primero</th>
-        </tr>
-        </thead>
-        <tbody></tbody>
-    </table>
-</div>
 
 <script>
-const manifestUri = '/ktor/sprite/sprite.mpd';
-    let chart;
-    let fragmentLog = [];
-    let stats = { peer: 0, http: 0 };
+    document.addEventListener('DOMContentLoaded', async () => {
+        const video = document.getElementById('video');
 
-    navigator.serviceWorker.addEventListener('message', async (event) => {
-        const data = event.data;
+        if (shaka.Player.isBrowserSupported()) {
+            const player = new shaka.Player();
+            player.attach(video);
 
-        if (data.type === 'fragment') {
-            checkCacheStatus();
-            addFragmentToLog({
-                url: data.url,
-                source: data.source,
-                peerId: data.peerId || null
+            player.addEventListener('error', (event) => {
+                console.error('Error de Shaka Player:', event.detail);
             });
+
+            try {
+                await player.load('https://dashp2p.infinitebuffer.com/ktor/sprite/sprite.mpd');
+            } catch (error) {
+                console.error('No se pudo cargar el video:', error);
+            }
+        } else {
+            console.error('Shaka Player no es compatible con este navegador.');
         }
     });
-
-    function addFragmentToLog({ url, source, peerId }) {
-        const now = performance.now();
-        const existing = fragmentLog.find(e => e.url === url);
-        const isDuplicate = !!existing;
-        const entry = {
-            url,
-            source,
-            peerId,
-            timestamp: now,
-            first: !isDuplicate
-        };
-        fragmentLog.push(entry);
-        const tbody = document.querySelector('#log-table tbody');
-        const tr = document.createElement('tr');
-        tr.innerHTML = `
-      <td>${url}</td>
-      <td>${source}</td>
-      <td>${peerId || '-'}</td>
-      <td>${now.toFixed(1)} ms</td>
-      <td>${entry.first ? '✅' : '—'}</td>
-    `;
-        if (!entry.first) {
-            tr.style.opacity = '0.5';
-            tr.style.fontStyle = 'italic';
-        }
-        tbody.prepend(tr);
-        stats[source]++;
-        chart.data.datasets[0].data = [stats.peer, stats.http];
-        chart.update();
-    }
-
-    function initChart() {
-        const ctx = document.getElementById('chart').getContext('2d');
-        chart = new Chart(ctx, {
-            type: 'bar',
-            data: {
-                labels: ['P2P', 'Servidor'],
-                datasets: [{
-                    label: 'Fragmentos recibidos',
-                    data: [0, 0],
-                    backgroundColor: ['#4caf50', '#2196f3']
-                }]
-            },
-            options: {
-                responsive: false,
-                plugins: { legend: { display: false } },
-                scales: { y: { beginAtZero: true } }
-            }
-        });
-    }
-
-    async function initPlayer() {
-
-        initChart();
-        shaka.polyfill.installAll();
-        if (!shaka.Player.isBrowserSupported()) return;
-        const video = document.getElementById('video');
-        const player = new shaka.Player(video);
-        await player.load(manifestUri);
-    }
-
-    window.addEventListener('load', initPlayer);
-
-    async function clearCache() {
-        const result = await caches.delete('video-fragments');
-        await caches.delete('fragment-logs');
-        const status = document.getElementById('cache-status');
-        if (result) {
-            status.textContent = '✅ Caché eliminada';
-            console.log('🗑️ Caché "video-fragments" eliminada');
-        } else {
-            status.textContent = '⚠️ Caché no encontrada';
-            console.warn('⚠️ No se pudo eliminar la caché (¿no existe?)');
-        }
-        document.querySelector('#log-table tbody').innerHTML = '';
-        if (chart) {
-            stats.peer = 0;
-            stats.http = 0;
-            chart.data.datasets[0].data = [0, 0];
-            chart.update();
-        }
-        fragmentLog = [];
-    }
-
-    async function checkCacheStatus() {
-        const cache = await caches.open('video-fragments');
-        const requests = await cache.keys();
-        const status = document.getElementById('cache-status');
-        if (requests.length > 0) {
-            status.textContent = '';
-        }
-    }
-
 </script>
+
+
 
 </body>
 </html>
