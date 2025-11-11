@@ -1,49 +1,93 @@
 <!DOCTYPE html>
 <html lang="es">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Shaka Player</title>
-    <link rel="icon" href="data:,">
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.9.2/shaka-player.compiled.js"></script>
-    <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
-    <script src="swarmLayer_pb.js"></script>
-    <script src="peer.js"></script>
 
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SwarmLayer · Shaka Player</title>
+  <link rel="icon" href="data:," />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.9.2/shaka-player.compiled.js"></script>
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script src="swarmLayer_pb.js"></script>
+  <script src="peer.js"></script>
 </head>
+
 <body>
 
+  <h1>SwarmLayer</h1>
+  <div>Mi ID: <span id="my-id">cargando...</span></div>
 
-<div>Mi ID: <span id="my-id">cargando...</span></div>
+  <label for="mpd-select">Selecciona MPD:</label>
+  <select id="mpd-select">
 
-<video id="video" width="640" controls autoplay></video>
+    <option value="https://dashp2p.infinitebuffer.com/ktor/sprite/sprite.mpd">
+        Sprite (dashp2p demo)
+    </option>
+
+    <option value="https://dash.akamaized.net/envivio/EnvivioDash3/manifest.mpd">
+      Envivio MultiRate (VOD)
+    </option>
+    <option value="https://dash.akamaized.net/dash264/TestCasesUHD/2b/11/MultiRate.mpd">
+      Akamai UHD MultiRate (VOD)
+    </option>
+    <option value="https://dash.akamaized.net/dash264/TestCasesIOP33/adapatationSetSwitching/5/manifest.mpd">
+      Akamai AdaptationSet Switching (VOD)
+    </option>
+    <option
+      value="https://bitmovin-a.akamaihd.net/content/MI201109210084_1/mpds/f08e80da-bf1d-4e3d-8899-f0f6155f6efa.mpd">
+      Bitmovin Sample (VOD)
+    </option>
+
+    <option value="https://demo.unified-streaming.com/k8s/vod2live/stable/unified-learning.isml/.mpd">
+      Unified Streaming vod2live (LIVE)
+    </option>
+
+
+  </select>
 
 
 
-<script>
+  <br><br>
+  <video id="video" width="640" controls autoplay></video>
+
+  <footer style="margin-top:30px; text-align:center; font-family:sans-serif; color:#666;">
+    Grupo de Comunicaciones Multimedia - iTEAM
+  </footer>
+
+  <script>
     document.addEventListener('DOMContentLoaded', async () => {
-        const video = document.getElementById('video');
+      const video = document.getElementById('video');
+      const select = document.getElementById('mpd-select');
 
-        if (shaka.Player.isBrowserSupported()) {
-            const player = new shaka.Player();
-            player.attach(video);
+      if (shaka.Player.isBrowserSupported()) {
+        const player = new shaka.Player();
+        player.attach(video);
 
-            player.addEventListener('error', (event) => {
-                console.error('Error de Shaka Player:', event.detail);
-            });
+        player.addEventListener('error', (event) => {
+          console.error('Error de Shaka Player:', event.detail);
+        });
 
-            try {
-                await player.load('https://dashp2p.infinitebuffer.com/ktor/sprite/sprite.mpd');
-            } catch (error) {
-                console.error('No se pudo cargar el video:', error);
-            }
-        } else {
-            console.error('Shaka Player no es compatible con este navegador.');
+        async function loadSelected() {
+          try {
+            await player.load(select.value);
+            console.log('Reproduciendo:', select.value);
+          } catch (error) {
+            console.error('No se pudo cargar el video:', error);
+          }
         }
+
+        // Cargar el primero por defecto
+        await loadSelected();
+
+        // Cambiar al seleccionar otra MPD
+        select.addEventListener('change', loadSelected);
+      } else {
+        console.error('Shaka Player no es compatible con este navegador.');
+      }
+
     });
-</script>
-
-
+  </script>
 
 </body>
+
 </html>

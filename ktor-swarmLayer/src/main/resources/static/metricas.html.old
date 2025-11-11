@@ -1,0 +1,173 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Métricas P2P/HTTP — Técnico</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            font-family: Consolas, monospace;
+            margin: 20px;
+            background: #1e1e1e;
+            color: #ddd;
+        }
+        h2 { color: #eee; margin-bottom: 8px; }
+        select {
+            background: #2b2b2b;
+            color: #ddd;
+            border: 1px solid #444;
+            padding: 6px 8px;
+            border-radius: 4px;
+        }
+        canvas {
+            max-width: 100%;
+            background: #2b2b2b;
+            border-radius: 8px;
+            padding: 8px;
+        }
+    </style>
+</head>
+<body>
+<h2>Tráfico global SwarmLayer</h2>
+<label>Rango de tiempo:</label>
+<select id="timeRange">
+    <option value="5">Últimos 5 min</option>
+    <option value="10" selected>Últimos 10 min</option>
+    <option value="30">Últimos 30 min</option>
+    <option value="60">Última hora</option>
+    <option value="120">Últimas 2h</option>
+    <option value="240">Últimas 4h</option>
+</select>
+
+<canvas id="trafficChart" height="130"></canvas>
+
+<script>
+    const ctx = document.getElementById('trafficChart').getContext('2d');
+    let chart;
+    const BUCKET_MS = 10_000;
+
+    async function fetchMetrics(minutes) {
+        try {
+            const res = await fetch(`https://dashp2p.infinitebuffer.com/ktor/metrics?minutes=${minutes}`, {
+                cache: "no-store"
+            });
+
+            if (!res.ok) return [];
+            return await res.json();
+        } catch {
+            return [];
+        }
+    }
+
+    function clamp(val) {
+        return isFinite(val) && !isNaN(val) ? val : 0;
+    }
+
+    function createTimeline(cutoff, now, interval) {
+        const timeline = [];
+        const start = Math.floor(cutoff / interval) * interval;
+        const endClosed = Math.floor(now / interval) * interval - interval;
+        for (let t = start; t <= endClosed; t += interval) timeline.push(t);
+        return timeline;
+    }
+
+
+
+    function aggregateData(metrics, minutes, interval = BUCKET_MS) {
+        const now = Date.now();
+        const cutoff = now - minutes * 60 * 1000;
+        const timeline = createTimeline(cutoff, now, interval);
+
+        const buckets = new Map();
+        for (const ts of timeline) {
+            buckets.set(ts, { p2p: 0, http: 0, peers: new Set() });
+        }
+
+        for (const m of metrics) {
+            if (!m || typeof m.timestamp !== "number") continue;
+            let bucket = Math.floor(m.timestamp / interval) * interval;
+            const first = timeline[0], last = timeline[timeline.length - 1];
+            if (bucket < first) continue;
+            if (bucket > last) continue;
+
+
+            const b = buckets.get(bucket);
+            if (!b) continue;
+            const src = (m.source || "").toLowerCase();
+            if (src === "p2p") b.p2p += clamp(m.sizeBytes);
+            else if (src === "http") b.http += clamp(m.sizeBytes);
+            if (m.senderPeerId) b.peers.add(m.senderPeerId);
+            if (m.receiverPeerId) b.peers.add(m.receiverPeerId);
+        }
+
+        const labels = timeline.map(t => new Date(t).toLocaleTimeString());
+        const p2p = timeline.map(t => +(clamp(buckets.get(t).p2p) / 1024).toFixed(2));
+        const http = timeline.map(t => +(clamp(buckets.get(t).http) / 1024).toFixed(2));
+        const peers = timeline.map(t => buckets.get(t).peers.size);
+
+        return { labels, p2p, http, peers };
+    }
+
+    async function updateChart() {
+        const minutes = +document.getElementById("timeRange").value || 10;
+        const metrics = await fetchMetrics(minutes);
+        const data = aggregateData(metrics, minutes);
+
+        if (!chart) {
+            chart = new Chart(ctx, {
+                type: "line",
+                data: {
+                    labels: data.labels,
+                    datasets: [
+                        { label: "P2P (KB)", data: data.p2p, borderColor: "#7CFC00", borderWidth: 1.3, tension: 0.1, fill: false, pointRadius: 0 },
+                        { label: "HTTP (KB)", data: data.http, borderColor: "#00BFFF", borderWidth: 1.3, tension: 0.1, fill: false, pointRadius: 0 },
+                        { label: "Peers activos", data: data.peers, borderColor: "#FFA500", borderWidth: 1, borderDash: [4, 4], tension: 0.1, fill: false, pointRadius: 0, yAxisID: "yPeers" }
+                    ]
+                },
+                options: {
+                    interaction: { mode: "index", intersect: false },
+                    animation: false,
+                    scales: {
+                        x: {
+                            ticks: { color: "#aaa" },
+                            grid: { color: "#333" },
+                            title: { display: true, text: "Tiempo", color: "#bbb" }
+                        },
+                        y: {
+                            beginAtZero: true,
+                            suggestedMin: 0,
+                            suggestedMax: 100, // evita escalar infinito
+                            ticks: { color: "#aaa" },
+                            grid: { color: "#333" },
+                            title: { display: true, text: "KB transferidos", color: "#bbb" }
+                        },
+                        yPeers: {
+                            beginAtZero: true,
+                            suggestedMax: 10,
+                            position: "right",
+                            ticks: { color: "#ffb347" },
+                            grid: { drawOnChartArea: false },
+                            title: { display: true, text: "Peers activos", color: "#ffb347" }
+                        }
+                    },
+                    plugins: {
+                        legend: { labels: { color: "#ccc" } }
+                    }
+                }
+            });
+        } else {
+            chart.data.labels = data.labels;
+            chart.data.datasets[0].data = data.p2p;
+            chart.data.datasets[1].data = data.http;
+            chart.data.datasets[2].data = data.peers;
+            chart.update("none");
+        }
+    }
+
+    document.getElementById("timeRange").addEventListener("change", updateChart);
+    setInterval(updateChart, 10_000);
+    updateChart();
+</script>
+</body>
+</html>
