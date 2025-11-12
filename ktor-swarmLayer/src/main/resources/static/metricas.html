@@ -1,175 +1,242 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="es">
 <head>
   <meta charset="utf-8" />
+  <title>Mini-Consola de Métricas</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Métricas P2P/HTTP — Realtime</title>
-  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
   <style>
-    body { font-family: Consolas, monospace; margin: 20px; background:#1e1e1e; color:#ddd; }
-    h2 { color:#eee; margin-bottom:8px; }
-    select { background:#2b2b2b; color:#ddd; border:1px solid #444; padding:6px 8px; border-radius:4px; }
-    canvas { max-width:100%; background:#2b2b2b; border-radius:8px; padding:8px; }
-    .row { display:flex; gap:12px; align-items:center; margin-bottom:8px; flex-wrap:wrap; }
-    small { color:#aaa }
+    :root { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    body { margin: 0; background: #0b0f14; color: #cdd6f4; }
+    header {
+      padding: 12px 16px;
+      background: #0e131a;
+      border-bottom: 1px solid #1d2633;
+      display: flex; gap: 12px; align-items: center;
+    }
+    select, button {
+      background: #111827; color: #e5e7eb;
+      border: 1px solid #374151; border-radius: 6px;
+      padding: 6px 8px; cursor: pointer;
+    }
+    #stats { margin-left: auto; opacity: .9; font-size: 12px; border: none; padding: 0; background: transparent; }
+    #consoleWrap { height: calc(100vh - 56px); overflow: auto; }
+    pre { margin: 0; padding: 12px 16px; white-space: pre-wrap; word-break: break-word; line-height: 1.35; }
+    .http { color: #93c5fd; }
+    .p2p  { color: #fca5a5; }
+    .muted { opacity: .6; }
+    .line { border-bottom: 1px dashed #1f2937; padding: 6px 0; }
   </style>
 </head>
 <body>
-<h2>Tráfico global SwarmLayer</h2>
-<div class="row">
-  <label for="timeRange">Rango de tiempo:</label>
-  <select id="timeRange">
-    <option value="5">Últimos 5 min</option>
-    <option value="10" selected>Últimos 10 min</option>
-    <option value="30">Últimos 30 min</option>
-    <option value="60">Última hora</option>
-    <option value="120">Últimas 2h</option>
-    <option value="240">Últimas 4h</option>
-  </select>
-  <small id="status">— conectando…</small>
+<header>
+  <div>Ventana:
+    <select id="window">
+      <option value="5">Últimos 5 min</option>
+      <option value="10">Últimos 10 min</option>
+      <option value="15">Últimos 15 min</option>
+      <option value="30">Últimos 30 min</option>
+      <option value="60">Última 1 h</option>
+    </select>
+  </div>
+  <button id="clearBtn" title="Limpiar consola">Limpiar</button>
+  <div id="stats" class="muted">—</div>
+</header>
+
+<div id="consoleWrap">
+  <pre id="console"></pre>
 </div>
 
-<canvas id="trafficChart" height="130"></canvas>
-
 <script>
-  const ctx = document.getElementById('trafficChart').getContext('2d');
-  const BUCKET_MS = 10_000;
+  // Máximo de líneas que mantenemos cuando estás al fondo (para no crecer infinito).
+  // No se recorta mientras estás leyendo arriba.
+  const CONSOLE_MAX_LINES = 2000;
 
-  let chart;
-  let timeline = [];                    // array de timestamps (inicio de bucket)
-  let buckets = new Map();              // ts -> { p2p: number, http: number, peers: Set<string> }
-  let windowMinutes = 10;
-  let es;                               // EventSource
+  let windowMinutes = 5;
+  let items = [];         // datos
+  let sse;
+  let lastRenderedIndex = 0; // cuántos items ya están pintados
 
-  const clamp = (v) => (isFinite(v) && !isNaN(v)) ? v : 0;
+  const $console = document.getElementById("console");
+  const $wrap = document.getElementById("consoleWrap");
+  const $window = document.getElementById("window");
+  const $stats = document.getElementById("stats");
+  const $clear = document.getElementById("clearBtn");
 
-  function floorBucket(ts) { return Math.floor(ts / BUCKET_MS) * BUCKET_MS; }
-
-  function createTimeline(now, minutes) {
-    const start = Math.floor((now - minutes*60*1000) / BUCKET_MS) * BUCKET_MS;
-    const end = Math.floor(now / BUCKET_MS) * BUCKET_MS; // bucket "actual" excluido al graficar
-    const arr = [];
-    for (let t = start; t < end; t += BUCKET_MS) arr.push(t);
-    return arr;
+  function pad(n) { return n.toString().padStart(2, "0"); }
+  function fmtTime(ms) {
+    const d = new Date(ms);
+    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
+  }
+  function fmtBytes(n) {
+    if (!n) return "0 B";
+    const units = ["B","KB","MB","GB","TB"];
+    let i = 0, val = n;
+    while (val >= 1024 && i < units.length - 1) { val /= 1024; i++; }
+    const decimals = val < 10 && i > 0 ? 1 : 0;
+    return `${val.toFixed(decimals)} ${units[i]}`;
+  }
+  function fmtPct(part, total) {
+    if (!total) return "0%";
+    return `${((part * 100) / total).toFixed(1)}%`;
   }
 
-  function ensureBuckets() {
-    const now = Date.now();
-    const newTimeline = createTimeline(now, windowMinutes);
-    timeline = newTimeline;
+  function lineHtml(m) {
+    const isHttp = (m.source || "").toLowerCase() === "http";
+    const cls = isHttp ? "http" : "p2p";
+    const sender = isHttp ? "-" : (m.sender || "-");
+    return [
+      `<span class="muted">[${fmtTime(m.time)}]</span>`,
+      `<span class="${cls}">${(m.source || "").toUpperCase()}</span>`,
+      `sender=${sender}`,
+      `receiver=${m.receiver}`,
+      `size=${fmtBytes(m.sizeBytes)}`,
+      `frag=${m.fragmentUrl}`
+    ].join("  ");
+  }
 
-    // recortar añejos
-    const first = newTimeline[0], last = newTimeline[newTimeline.length - 1];
-    for (const key of buckets.keys()) {
-      if (key < first || key > last) buckets.delete(key);
+  // Pinta SOLO las nuevas líneas (incremental)
+  function appendNewLines() {
+    const frag = document.createDocumentFragment();
+    for (let i = lastRenderedIndex; i < items.length; i++) {
+      const m = items[i];
+      const div = document.createElement("div");
+      div.className = "line";
+      div.innerHTML = lineHtml(m);
+      frag.appendChild(div);
     }
-    // asegurar todos
-    for (const t of newTimeline) {
-      if (!buckets.has(t)) buckets.set(t, { p2p: 0, http: 0, peers: new Set() });
+    $console.appendChild(frag);
+    lastRenderedIndex = items.length;
+  }
+
+  // Recalcula y pinta el panel de estadísticas (no toca las líneas)
+  function renderStats() {
+    const totals = items.reduce((acc, m) => {
+      const bytes = m.sizeBytes || 0;
+      const isHttp = (m.source || "").toLowerCase() === "http";
+      acc.total += bytes;
+      if (isHttp) acc.http += bytes; else acc.p2p += bytes;
+      return acc;
+    }, { total: 0, http: 0, p2p: 0 });
+
+    $stats.textContent =
+            `Eventos: ${items.length}  •  Total: ${fmtBytes(totals.total)}  •  ` +
+            `HTTP: ${fmtBytes(totals.http)} (${fmtPct(totals.http, totals.total)})  •  ` +
+            `P2P: ${fmtBytes(totals.p2p)} (${fmtPct(totals.p2p, totals.total)})  •  ` +
+            `Ventana: ${windowMinutes} min`;
+  }
+
+  // Aplica poda por ventana SOLO si estás al fondo (para no mover la vista)
+  function pruneByWindowIfAtBottom() {
+    const atBottom = $wrap.scrollTop + $wrap.clientHeight >= $wrap.scrollHeight - 8;
+    if (!atBottom) return; // no toques nada si el usuario está leyendo arriba
+
+    const cutoff = Date.now() - windowMinutes * 60 * 1000;
+    // Calcula cuántos hay al principio que caen fuera de la ventana
+    let removeCount = 0;
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].time < cutoff) removeCount++; else break;
     }
-  }
-
-  function ingest(metric) {
-    // métrica con forma { time, source, sizeBytes, sender, receiver }
-    const b = floorBucket(metric.time);
-    if (!timeline.length) return;
-    const first = timeline[0], last = timeline[timeline.length - 1];
-    if (b < first || b > last) return;  // fuera de ventana
-
-    if (!buckets.has(b)) buckets.set(b, { p2p: 0, http: 0, peers: new Set() });
-    const slot = buckets.get(b);
-
-    const src = String(metric.source || '').toLowerCase();
-    if (src === 'p2p') slot.p2p += clamp(metric.sizeBytes);
-    else if (src === 'http') slot.http += clamp(metric.sizeBytes);
-
-    if (metric.sender) slot.peers.add(metric.sender);
-    if (metric.receiver) slot.peers.add(metric.receiver);
-  }
-
-  function toChartData() {
-    const labels = timeline.map(t => new Date(t).toLocaleTimeString());
-    const p2p = timeline.map(t => +(clamp(buckets.get(t)?.p2p || 0) / 1024).toFixed(2));
-    const http = timeline.map(t => +(clamp(buckets.get(t)?.http || 0) / 1024).toFixed(2));
-    const peers = timeline.map(t => (buckets.get(t)?.peers.size || 0));
-    return { labels, p2p, http, peers };
-  }
-
-  function render() {
-    const data = toChartData();
-    if (!chart) {
-      chart = new Chart(ctx, {
-        type: "line",
-        data: {
-          labels: data.labels,
-          datasets: [
-            { label: "P2P (KB)",  data: data.p2p,  borderColor: "#7CFC00", borderWidth: 1.3, tension: 0.1, fill: false, pointRadius: 0 },
-            { label: "HTTP (KB)", data: data.http, borderColor: "#00BFFF", borderWidth: 1.3, tension: 0.1, fill: false, pointRadius: 0 },
-            { label: "Peers activos", data: data.peers, borderColor: "#FFA500", borderWidth: 1, borderDash: [4,4], tension: 0.1, fill: false, pointRadius: 0, yAxisID: "yPeers" }
-          ]
-        },
-        options: {
-          interaction: { mode: "index", intersect: false },
-          animation: false,
-          scales: {
-            x: { ticks:{color:"#aaa"}, grid:{color:"#333"}, title:{display:true, text:"Tiempo", color:"#bbb"} },
-            y: { beginAtZero:true, suggestedMin:0, suggestedMax:100, ticks:{color:"#aaa"}, grid:{color:"#333"}, title:{display:true, text:"KB transferidos", color:"#bbb"} },
-            yPeers: { beginAtZero:true, suggestedMax:10, position:"right", ticks:{color:"#ffb347"}, grid:{drawOnChartArea:false}, title:{display:true, text:"Peers activos", color:"#ffb347"} }
-          },
-          plugins: { legend: { labels: { color: "#ccc" } } }
-        }
-      });
-    } else {
-      chart.data.labels = data.labels;
-      chart.data.datasets[0].data = data.p2p;
-      chart.data.datasets[1].data = data.http;
-      chart.data.datasets[2].data = data.peers;
-      chart.update("none");
-    }
-  }
-
-  async function loadHistory() {
-    ensureBuckets();
-    const res = await fetch(`/ktor/metrics?minutes=${windowMinutes}`, { cache: "no-store" });
-    if (res.ok) {
-      const arr = await res.json();
-      for (const m of arr) ingest(m);
-    }
-    render();
-  }
-
-  function startSSE() {
-    if (es) { es.close(); es = null; }
-    const status = document.getElementById('status');
-
-    try {
-      es = new EventSource('/ktor/metrics/stream');
-      status.textContent = "— en tiempo real";
-      es.onmessage = (ev) => {
-        const m = JSON.parse(ev.data);
-        ensureBuckets();   // puede haber cambiado ventana/tiempo
-        ingest(m);
-        render();
-      };
-      es.onerror = () => { status.textContent = "— reconectando…"; };
-    } catch {
-      status.textContent = "— SSE no disponible";
+    if (removeCount > 0) {
+      items.splice(0, removeCount);
+      // Elimina los primeros removeCount nodos DOM
+      for (let i = 0; i < removeCount; i++) {
+        if ($console.firstChild) $console.removeChild($console.firstChild);
+      }
+      lastRenderedIndex = Math.max(0, lastRenderedIndex - removeCount);
     }
   }
 
-  document.getElementById("timeRange").addEventListener("change", async (e) => {
-    windowMinutes = +e.target.value || 10;
-    buckets.clear();
-    await loadHistory();
+  // Recorte por máximo de líneas SOLO si estás al fondo
+  function trimMaxLinesIfAtBottom() {
+    const atBottom = $wrap.scrollTop + $wrap.clientHeight >= $wrap.scrollHeight - 8;
+    if (!atBottom) return;
+
+    const extra = items.length - CONSOLE_MAX_LINES;
+    if (extra > 0) {
+      items.splice(0, extra);
+      for (let i = 0; i < extra; i++) {
+        if ($console.firstChild) $console.removeChild($console.firstChild);
+      }
+      lastRenderedIndex = Math.max(0, lastRenderedIndex - extra);
+    }
+  }
+
+  // Render principal: solo añade nuevas líneas y actualiza stats
+  function renderIncremental() {
+    const atBottom = $wrap.scrollTop + $wrap.clientHeight >= $wrap.scrollHeight - 8;
+
+    appendNewLines();
+    renderStats();
+
+    // Si estabas abajo, baja al final para ver lo nuevo
+    if (atBottom) {
+      $wrap.scrollTop = $wrap.scrollHeight;
+    }
+  }
+
+  async function loadInitial(minutes) {
+    const res = await fetch(`/ktor/metrics?minutes=${minutes}`);
+    if (!res.ok) {
+      console.error("Error cargando histórico:", res.status);
+      return;
+    }
+    const data = await res.json();
+    // Ordena por tiempo para pintar en orden
+    items = (data.items || []).sort((a, b) => a.time - b.time);
+
+    // Construcción inicial del DOM
+    $console.innerHTML = "";
+    lastRenderedIndex = 0;
+    appendNewLines();
+    renderStats();
+    // Al cargar, situamos al fondo
+    $wrap.scrollTop = $wrap.scrollHeight;
+  }
+
+  function ensureSSE() {
+    if (sse) sse.close();
+    sse = new EventSource("/ktor/metrics/live");
+
+    sse.addEventListener("metric", (e) => {
+      const raw = (e.data || "").trim();
+      if (!(raw.startsWith("{") || raw.startsWith("["))) return;
+      try {
+        const m = JSON.parse(raw);
+        items.push(m);
+        pruneByWindowIfAtBottom(); // poda por ventana solo si estás abajo
+        trimMaxLinesIfAtBottom();  // recorte por máximo solo si estás abajo
+        renderIncremental();       // añade SOLO la nueva línea
+      } catch (err) {
+        console.error("No se pudo parsear SSE:", err, "raw=", raw);
+      }
+    });
+
+    sse.onopen  = () => console.log("[SSE] conectado");
+    sse.onerror = (e) => console.warn("[SSE] error/desconexión:", e);
+  }
+
+  $window.addEventListener("change", async (e) => {
+    windowMinutes = parseInt(e.target.value, 10);
+    await loadInitial(windowMinutes);
   });
 
-  // refresco suave de eje X (por si el reloj avanza y la ventana se desplaza)
-  setInterval(() => { ensureBuckets(); render(); }, 10_000);
+  $clear.addEventListener("click", () => {
+    items = [];
+    $console.innerHTML = "";
+    lastRenderedIndex = 0;
+    renderStats();
+  });
 
-  // bootstrap:
-  (async function init(){
-    await loadHistory();
-    startSSE();
+  // Poda periódica: solo si estás abajo (no mover vista)
+  setInterval(() => {
+    pruneByWindowIfAtBottom();
+    trimMaxLinesIfAtBottom();
+  }, 5000);
+
+  (async function init() {
+    windowMinutes = parseInt($window.value, 10);
+    await loadInitial(windowMinutes);
+    ensureSSE();
   })();
 </script>
 </body>
