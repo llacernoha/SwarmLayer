@@ -1,8 +1,8 @@
 <!doctype html>
-<html lang="es">
+<html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Mini-Consola de Métricas</title>
+  <title>Mini Console (aligned columns, size left)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     :root { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -11,230 +11,209 @@
       padding: 12px 16px;
       background: #0e131a;
       border-bottom: 1px solid #1d2633;
-      display: flex; gap: 12px; align-items: center;
+      display: flex; gap: 12px; align-items: center; flex-wrap: wrap;
     }
+    .controls { display: flex; gap: 8px; align-items: center; }
+    .label { opacity: .75; font-size: 12px; }
     select, button {
       background: #111827; color: #e5e7eb;
       border: 1px solid #374151; border-radius: 6px;
       padding: 6px 8px; cursor: pointer;
     }
     #stats { margin-left: auto; opacity: .9; font-size: 12px; border: none; padding: 0; background: transparent; }
+
     #consoleWrap { height: calc(100vh - 56px); overflow: auto; }
-    pre { margin: 0; padding: 12px 16px; white-space: pre-wrap; word-break: break-word; line-height: 1.35; }
-    .http { color: #93c5fd; }
-    .p2p  { color: #fca5a5; }
-    .muted { opacity: .6; }
-    .line { border-bottom: 1px dashed #1f2937; padding: 6px 0; }
+    pre { margin: 0; padding: 0 16px 12px 16px; white-space: pre; line-height: 1.35; }
+    #consoleHead {
+      position: sticky; top: 0;
+      background: #0b0f14;
+      padding: 12px 16px;
+      border-bottom: 1px dashed #1f2937;
+      z-index: 1;
+    }
+    #console { padding-top: 8px; }
+
+    .l.http { color: #60a5fa; }
+    .l.p2p  { color: #22c55e; }
   </style>
 </head>
 <body>
 <header>
-  <div>Ventana:
+  <div class="controls">
+    <span class="label">Window:</span>
     <select id="window">
-      <option value="5">Últimos 5 min</option>
-      <option value="10">Últimos 10 min</option>
-      <option value="15">Últimos 15 min</option>
-      <option value="30">Últimos 30 min</option>
-      <option value="60">Última 1 h</option>
+      <option value="5">Last 5 min</option>
+      <option value="10">Last 10 min</option>
+      <option value="15">Last 15 min</option>
+      <option value="30">Last 30 min</option>
+      <option value="60">Last 1 h</option>
     </select>
   </div>
-  <button id="clearBtn" title="Limpiar consola">Limpiar</button>
+
+  <button id="clearBtn" title="Clear console">Clear</button>
   <div id="stats" class="muted">—</div>
 </header>
 
 <div id="consoleWrap">
+  <pre id="consoleHead"></pre>
   <pre id="console"></pre>
 </div>
 
 <script>
-  // Máximo de líneas que mantenemos cuando estás al fondo (para no crecer infinito).
-  // No se recorta mientras estás leyendo arriba.
-  const CONSOLE_MAX_LINES = 2000;
+  // --- Config ---
+  const MAX_LINES = 500;
 
+  // Column widths (shared header + rows)
+  const COL_TIME   = 10; // [HH:MM:SS]
+  const COL_SRC    = 6;  // HTTP/P2P
+  const COL_SENDER = 45; // sender id
+  const COL_RECEIV = 45; // receiver id
+  const COL_SIZE   = 10; // size left-aligned
+
+  // --- State ---
   let windowMinutes = 5;
-  let items = [];         // datos
+  let items = [];
+  let lines = [];
   let sse;
-  let lastRenderedIndex = 0; // cuántos items ya están pintados
+  let needsRender = false;
 
-  const $console = document.getElementById("console");
-  const $wrap = document.getElementById("consoleWrap");
-  const $window = document.getElementById("window");
-  const $stats = document.getElementById("stats");
-  const $clear = document.getElementById("clearBtn");
+  // --- DOM ---
+  const $console = document.getElementById('console');
+  const $consoleHead = document.getElementById('consoleHead');
+  const $wrap = document.getElementById('consoleWrap');
+  const $window = document.getElementById('window');
+  const $stats = document.getElementById('stats');
+  const $clear = document.getElementById('clearBtn');
 
-  function pad(n) { return n.toString().padStart(2, "0"); }
-  function fmtTime(ms) {
-    const d = new Date(ms);
-    return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-  }
-  function fmtBytes(n) {
-    if (!n) return "0 B";
-    const units = ["B","KB","MB","GB","TB"];
-    let i = 0, val = n;
-    while (val >= 1024 && i < units.length - 1) { val /= 1024; i++; }
-    const decimals = val < 10 && i > 0 ? 1 : 0;
-    return `${val.toFixed(decimals)} ${units[i]}`;
-  }
-  function fmtPct(part, total) {
-    if (!total) return "0%";
-    return `${((part * 100) / total).toFixed(1)}%`;
-  }
+  // --- Utils ---
+  const pad  = n => n.toString().padStart(2,'0');
+  const fmtTime = ms => { const d=new Date(ms); return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`; };
+  function fmtBytes(n){ if(!n) return '0 B'; const u=['B','KB','MB','GB','TB']; let i=0,v=n; while(v>=1024&&i<u.length-1){v/=1024;i++;} const d=v<10&&i>0?1:0; return `${v.toFixed(d)} ${u[i]}`; }
+  const fmtPct = (p,t)=> !t ? '0%' : `${((p*100)/t).toFixed(1)}%`;
+  const esc = s => String(s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+  const padEnd  = (s,n)=> s.length>=n ? s : s + ' '.repeat(n - s.length);
+  const padStart= (s,n)=> s.length>=n ? s : ' '.repeat(n - s.length) + s;
 
-  function lineHtml(m) {
-    const isHttp = (m.source || "").toLowerCase() === "http";
-    const cls = isHttp ? "http" : "p2p";
-    const sender = isHttp ? "-" : (m.sender || "-");
-    return [
-      `<span class="muted">[${fmtTime(m.time)}]</span>`,
-      `<span class="${cls}">${(m.source || "").toUpperCase()}</span>`,
-      `sender=${sender}`,
-      `receiver=${m.receiver}`,
-      `size=${fmtBytes(m.sizeBytes)}`,
-      `frag=${m.fragmentUrl}`
-    ].join("  ");
+  // --- Header (same alignment as rows) ---
+  function headerText(){
+    const h1 = padEnd('time', COL_TIME);
+    const h2 = padEnd('type', COL_SRC);
+    const h3 = padEnd('sender', COL_SENDER);
+    const h4 = padEnd('receiver', COL_RECEIV);
+    const h5 = padEnd('size', COL_SIZE); // left-aligned now
+    const h6 = '  fragment';
+    return `${h1}  ${h2}  ${h3}  ${h4}  ${h5}${h6}`;
   }
 
-  // Pinta SOLO las nuevas líneas (incremental)
-  function appendNewLines() {
-    const frag = document.createDocumentFragment();
-    for (let i = lastRenderedIndex; i < items.length; i++) {
-      const m = items[i];
-      const div = document.createElement("div");
-      div.className = "line";
-      div.innerHTML = lineHtml(m);
-      frag.appendChild(div);
-    }
-    $console.appendChild(frag);
-    lastRenderedIndex = items.length;
+  // --- Row formatting ---
+  function lineText(m){
+    const time = `[${fmtTime(m.time)}]`;
+    const srcRaw = (m.source || '').toUpperCase();
+    const srcClass = (m.source || '').toLowerCase() === 'http' ? 'http' : 'p2p';
+    const sender = (m.source || '').toLowerCase() === 'http' ? '-' : (m.sender || '-');
+    const receiver = m.receiver || '-';
+    const sizeVal = fmtBytes(m.sizeBytes);
+    const frag = m.fragmentUrl || '';
+
+    const c1 = padEnd(time, COL_TIME);
+    const srcPad = ' '.repeat(Math.max(0, COL_SRC - srcRaw.length));
+    const c2 = `<span class="l ${srcClass}">${esc(srcRaw)}</span>${srcPad}`;
+    const c3 = padEnd(sender,   COL_SENDER);
+    const c4 = padEnd(receiver, COL_RECEIV);
+    const c5 = padEnd(sizeVal,  COL_SIZE); // ← now aligned left
+    const c6 = `  ${frag}`;
+
+    return `${esc(c1)}  ${c2}  ${esc(c3)}  ${esc(c4)}  ${esc(c5)}${esc(c6)}`;
   }
 
-  // Recalcula y pinta el panel de estadísticas (no toca las líneas)
-  function renderStats() {
-    const totals = items.reduce((acc, m) => {
-      const bytes = m.sizeBytes || 0;
-      const isHttp = (m.source || "").toLowerCase() === "http";
-      acc.total += bytes;
-      if (isHttp) acc.http += bytes; else acc.p2p += bytes;
-      return acc;
-    }, { total: 0, http: 0, p2p: 0 });
+  // --- Stats + rendering ---
+  function pruneByWindow(){
+    const cutoff = Date.now() - windowMinutes*60*1000;
+    let i=0; while(i<items.length && items[i].time<cutoff) i++;
+    if(i>0) items.splice(0,i);
+  }
 
+  function renderHeader(){
+    $consoleHead.textContent = headerText();
+  }
+
+  function renderStats(){
+    const totals = items.reduce((acc,m)=>{
+      const b = m.sizeBytes || 0;
+      const isHttp = (m.source||'').toLowerCase()==='http';
+      acc.total+=b; if(isHttp) acc.http+=b; else acc.p2p+=b; return acc;
+    }, {total:0, http:0, p2p:0});
     $stats.textContent =
-            `Eventos: ${items.length}  •  Total: ${fmtBytes(totals.total)}  •  ` +
-            `HTTP: ${fmtBytes(totals.http)} (${fmtPct(totals.http, totals.total)})  •  ` +
-            `P2P: ${fmtBytes(totals.p2p)} (${fmtPct(totals.p2p, totals.total)})  •  ` +
-            `Ventana: ${windowMinutes} min`;
+            `Fragments: ${items.length}  •  Total: ${fmtBytes(totals.total)}  •  `+
+            `HTTP: ${fmtBytes(totals.http)} (${fmtPct(totals.http, totals.total)})  •  `+
+            `P2P: ${fmtBytes(totals.p2p)} (${fmtPct(totals.p2p, totals.total)})  •  `+
+            `Window: ${windowMinutes} min`;
   }
 
-  // Aplica poda por ventana SOLO si estás al fondo (para no mover la vista)
-  function pruneByWindowIfAtBottom() {
-    const atBottom = $wrap.scrollTop + $wrap.clientHeight >= $wrap.scrollHeight - 8;
-    if (!atBottom) return; // no toques nada si el usuario está leyendo arriba
-
-    const cutoff = Date.now() - windowMinutes * 60 * 1000;
-    // Calcula cuántos hay al principio que caen fuera de la ventana
-    let removeCount = 0;
-    for (let i = 0; i < items.length; i++) {
-      if (items[i].time < cutoff) removeCount++; else break;
-    }
-    if (removeCount > 0) {
-      items.splice(0, removeCount);
-      // Elimina los primeros removeCount nodos DOM
-      for (let i = 0; i < removeCount; i++) {
-        if ($console.firstChild) $console.removeChild($console.firstChild);
-      }
-      lastRenderedIndex = Math.max(0, lastRenderedIndex - removeCount);
-    }
+  function scheduleRender(){
+    if(needsRender) return;
+    needsRender = true;
+    requestAnimationFrame(()=>{
+      const atBottom = $wrap.scrollTop + $wrap.clientHeight >= $wrap.scrollHeight - 8;
+      $console.innerHTML = lines.join('<br>');
+      needsRender = false;
+      if(atBottom) $wrap.scrollTop = $wrap.scrollHeight;
+      renderStats();
+    });
   }
 
-  // Recorte por máximo de líneas SOLO si estás al fondo
-  function trimMaxLinesIfAtBottom() {
-    const atBottom = $wrap.scrollTop + $wrap.clientHeight >= $wrap.scrollHeight - 8;
-    if (!atBottom) return;
-
-    const extra = items.length - CONSOLE_MAX_LINES;
-    if (extra > 0) {
-      items.splice(0, extra);
-      for (let i = 0; i < extra; i++) {
-        if ($console.firstChild) $console.removeChild($console.firstChild);
-      }
-      lastRenderedIndex = Math.max(0, lastRenderedIndex - extra);
-    }
-  }
-
-  // Render principal: solo añade nuevas líneas y actualiza stats
-  function renderIncremental() {
-    const atBottom = $wrap.scrollTop + $wrap.clientHeight >= $wrap.scrollHeight - 8;
-
-    appendNewLines();
-    renderStats();
-
-    // Si estabas abajo, baja al final para ver lo nuevo
-    if (atBottom) {
-      $wrap.scrollTop = $wrap.scrollHeight;
-    }
-  }
-
-  async function loadInitial(minutes) {
+  async function loadInitial(minutes){
     const res = await fetch(`/ktor/metrics?minutes=${minutes}`);
-    if (!res.ok) {
-      console.error("Error cargando histórico:", res.status);
-      return;
-    }
+    if(!res.ok){ console.error('Error loading history:', res.status); return; }
     const data = await res.json();
-    // Ordena por tiempo para pintar en orden
-    items = (data.items || []).sort((a, b) => a.time - b.time);
+    items = (data.items||[]).sort((a,b)=>a.time-b.time);
 
-    // Construcción inicial del DOM
-    $console.innerHTML = "";
-    lastRenderedIndex = 0;
-    appendNewLines();
-    renderStats();
-    // Al cargar, situamos al fondo
+    lines = [];
+    const start = Math.max(0, items.length - MAX_LINES);
+    for(let i=start;i<items.length;i++) lines.push(lineText(items[i]));
+
+    renderHeader();
+    $console.innerHTML = lines.join('<br>');
     $wrap.scrollTop = $wrap.scrollHeight;
+    renderStats();
   }
 
-  function ensureSSE() {
-    if (sse) sse.close();
-    sse = new EventSource("/ktor/metrics/live");
-
-    sse.addEventListener("metric", (e) => {
-      const raw = (e.data || "").trim();
-      if (!(raw.startsWith("{") || raw.startsWith("["))) return;
-      try {
+  function ensureSSE(){
+    if(sse) sse.close();
+    sse = new EventSource('/ktor/metrics/live');
+    sse.addEventListener('metric', e=>{
+      const raw = (e.data||'').trim();
+      if(!(raw.startsWith('{')||raw.startsWith('['))) return;
+      try{
         const m = JSON.parse(raw);
         items.push(m);
-        pruneByWindowIfAtBottom(); // poda por ventana solo si estás abajo
-        trimMaxLinesIfAtBottom();  // recorte por máximo solo si estás abajo
-        renderIncremental();       // añade SOLO la nueva línea
-      } catch (err) {
-        console.error("No se pudo parsear SSE:", err, "raw=", raw);
-      }
+        pruneByWindow();
+        lines.push(lineText(m));
+        if(lines.length > MAX_LINES) lines.splice(0, lines.length - MAX_LINES);
+        scheduleRender();
+      }catch(err){ console.error('Could not parse SSE:', err, 'raw=', raw); }
     });
-
-    sse.onopen  = () => console.log("[SSE] conectado");
-    sse.onerror = (e) => console.warn("[SSE] error/desconexión:", e);
+    sse.onopen  = ()=>console.log('[SSE] connected');
+    sse.onerror = e => console.warn('[SSE] error/disconnect:', e);
   }
 
-  $window.addEventListener("change", async (e) => {
-    windowMinutes = parseInt(e.target.value, 10);
+  // --- UI ---
+  $window.addEventListener('change', async (e)=>{
+    windowMinutes = parseInt(e.target.value,10);
     await loadInitial(windowMinutes);
   });
-
-  $clear.addEventListener("click", () => {
-    items = [];
-    $console.innerHTML = "";
-    lastRenderedIndex = 0;
+  $clear.addEventListener('click', ()=>{
+    items = []; lines = [];
+    $console.innerHTML = '';
+    renderHeader();
     renderStats();
   });
 
-  // Poda periódica: solo si estás abajo (no mover vista)
-  setInterval(() => {
-    pruneByWindowIfAtBottom();
-    trimMaxLinesIfAtBottom();
-  }, 5000);
+  setInterval(()=>{ pruneByWindow(); renderStats(); }, 5000);
 
-  (async function init() {
-    windowMinutes = parseInt($window.value, 10);
+  (async function init(){
+    renderHeader();
+    windowMinutes = parseInt($window.value,10);
     await loadInitial(windowMinutes);
     ensureSSE();
   })();
