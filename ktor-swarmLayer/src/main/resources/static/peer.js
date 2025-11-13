@@ -38,45 +38,42 @@ peer.on('open', async id => {
     console.log("Peer abierto con ID:", id);
     document.getElementById('my-id').innerText = id;
 
-
     await registerPeer(id);
-
     connectAllPeers();
 
     setInterval(() => sendKeepAlive(id), SERVER_KEEPALIVE_INTERVAL);
 
-    // Heartbeat entre peers
+    // Ping-Pong entre peers
     setInterval(() => {
         const now = Date.now();
 
         connections.forEach((peerData, peerId) => {
-            const { conn, lastHeartbeat } = peerData;
-            if (conn.open) {
+            if (peerData.conn.open) {
                 const pingMsg = new proto.ping();
                 pingMsg.setSecnumber(1);
                 const wrapper = new proto.swarmLayerMessage();
                 wrapper.setPing(pingMsg);
-                conn.send(wrapper.serializeBinary());
+                peerData.conn.send(wrapper.serializeBinary());
             }
 
-            if (now - lastHeartbeat > HEARTBEAT_TIMEOUT) {
+            if (now - peerData.lastHeartbeat > HEARTBEAT_TIMEOUT) {
                 console.warn('Peer no responde, cerrando conexión:', peerId);
-                conn.close();
+                peerData.conn.close();
             }
         });
     }, HEARTBEAT_INTERVAL);
 });
 
+// Conexión entrante siendo conn el objeto PeerJS que representa DataChannel y conn.peer la id del peer remoto
 peer.on('connection', conn => setupConnection(conn, conn.peer));
-
 
 // Funciones servidor
 function registerPeer(id) {
-    return fetch('https://dashp2p.infinitebuffer.com/ktor/register', {
+    fetch('https://dashp2p.infinitebuffer.com/ktor/register', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id })
-    }).then(res => res.json());
+    });
 }
 
 function sendKeepAlive(id) {
@@ -84,14 +81,14 @@ function sendKeepAlive(id) {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ id })
-    }).catch(err => console.warn('Keep-alive failed:', err));
+    });
 }
 
 function connectAllPeers() {
     fetch('https://dashp2p.infinitebuffer.com/ktor/peers')
         .then(res => res.json())
-        .then(data => {
-            data.peers.forEach(peerId => {
+        .then(peers => {
+            peers.forEach(peerId => {
                 if (peerId !== peer.id && !connections.has(peerId)) {
                     const conn = peer.connect(peerId);
                     setupConnection(conn, peerId);
@@ -111,10 +108,8 @@ function setupConnection(conn, remoteId) {
 
         const inv = new proto.inventory();
         inv.setUrlsList(Array.from(localInventory));
-
         const wrapper = new proto.swarmLayerMessage();
         wrapper.setInventory(inv);
-
         conn.send(wrapper.serializeBinary());
 
         // Si se reciben datos por dataChannel:
@@ -151,20 +146,23 @@ function setupConnection(conn, remoteId) {
                         navigator.serviceWorker.controller?.postMessage({ type: 'p2p-fragment-received', url });
                         console.log(`${url}, p2p, ${remoteId}, ${peer_id}, ${Date.now()}, ${size}`);
 
-                        await sendMetric({
-                            fragmentUrl: url,
-                            source: 'p2p',
-                            sender: remoteId,
-                            receiver: peer_id,
-                            time: Date.now(),
-                            sizeBytes: size
-                        });
+                        await sendMetric({ fragmentUrl: url, source: 'p2p', sender: remoteId, receiver: peer_id, time: Date.now(), sizeBytes: size });
+
+                        // Enviar inventario tras recibir por P2P
+                        const localInventory = await getLocalInventory();
+                        const inv = new proto.inventory();
+                        inv.setUrlsList(Array.from(localInventory));
+                        const wrap = new proto.swarmLayerMessage();
+                        wrap.setInventory(inv);
+                        const bin = wrap.serializeBinary();
+                        for (const value of connections.values()) value.conn.send(bin);
 
                         break;
                     }
 
+
                     case proto.swarmLayerMessage.MsgCase.INVENTORY: {
-                        const urls = msg.getInventory().getUrlsList();
+                        const urls = msg.getInventory().getUrlsList(); // Array de strings
                         navigator.serviceWorker.controller?.postMessage({ type: 'peerInventory', peerId: remoteId, urls });
                         break;
                     }
@@ -201,7 +199,7 @@ function setupConnection(conn, remoteId) {
     });
 }
 
-// Obtener urls en caché
+// Obtener urls de cache
 async function getLocalInventory() {
     const cache = await caches.open('video-fragments');
     const requests = await cache.keys();
@@ -259,17 +257,9 @@ navigator.serviceWorker?.addEventListener('message', async (event) => {
             for (const value of connections.values()) {
                 value.conn.send(bin);
             }
-            console.log(`${data.url}, http, , ${peer_id}, ${Date.now()}, ${data.size}`);
+            console.log(`${data.url}, http, -, ${peer_id}, ${Date.now()}, ${data.size}`);
 
-            await sendMetric({
-                fragmentUrl: data.url,
-                source: 'http',
-                sender: '',
-                receiver: peer_id,
-                time: Date.now(),
-                sizeBytes: data.size
-            });
-
+            await sendMetric({ fragmentUrl: data.url, source: 'http', sender: '', receiver: peer_id, time: Date.now(), sizeBytes: data.size });
             break;
     }
 

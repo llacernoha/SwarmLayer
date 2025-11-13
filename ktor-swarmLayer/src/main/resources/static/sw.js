@@ -5,14 +5,14 @@ const peerInventory = new Map();
 const pendingFragments = new Map();
 
 function postMessage(data) {
-    // Envía a todas las pestañas
+    // Envía el mensaje a todas las pestañas
     self.clients.matchAll().then(list => {
         for (const c of list) c.postMessage(data);
     });
 }
 self.addEventListener('fetch', event => {
     const url = event.request.url;
-    if (!url.includes('.m4s') && !url.includes('.mp4')) return;
+    if (!url.includes('.m4s') && !url.includes('.mp4') ) return;
 
     event.respondWith((async () => {
         const cache = await caches.open('video-fragments');
@@ -29,7 +29,7 @@ self.addEventListener('fetch', event => {
             if (urls.has(url)) peersWith.push(peerId);
         });
 
-        // 3) Si hay peers, solicitamos y esperamos hasta 2 s
+        // 3) Si hay peers, solicitamos y esperamos
         if (peersWith.length > 0) {
             const peerId = peersWith[Math.floor(Math.random() * peersWith.length)];
 
@@ -67,15 +67,15 @@ self.addEventListener('fetch', event => {
             if (contentLength) {
                 size = parseInt(contentLength, 10);
             } else {
-                // Si no viene el header, calcularlo
+                // Si no viene del header, calcularlo
                 const buffer = await resp.clone().arrayBuffer(); 
                 size = buffer.byteLength;
             }
-            // Clonamos la respuesta: se consume y la necesitamos para caché, calcular el tamaño y return
+            // Clonamos la respuesta ya que se consume y la necesitamos tanto para caché, calcular el tamaño y el return
             await cache.put(url, resp.clone());
         }
 
-        // Notificar peer.js
+        // Notificar fragmento recibido
         postMessage({ type: 'http-fragment-received', url, size });
 
         return resp;

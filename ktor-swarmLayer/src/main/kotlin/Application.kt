@@ -3,11 +3,11 @@ package comm
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
-import io.ktor.server.plugins.contentnegotiation.ContentNegotiation
+import io.ktor.server.plugins.contentnegotiation.*
+import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import io.ktor.server.http.content.*
-import io.ktor.server.request.*
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
@@ -19,7 +19,7 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
 
-// ========= DTOs / Models =========
+// ---- DTOs mínimos ----
 
 @Serializable
 data class PeerRegistration(val id: String)
@@ -27,62 +27,34 @@ data class PeerRegistration(val id: String)
 @Serializable
 data class MetricData(
     val fragmentUrl: String,
-    val source: String,          // "p2p" o "http"
-    val sender: String? = null,  // null/"" si http
-    val receiver: String,        // siempre un peer
-    val time: Long,              // epoch millis
+    val source: String,   // "p2p" o "http"
+    val sender: String? = null,
+    val receiver: String,
+    val time: Long,
     val sizeBytes: Long
 )
 
-@Serializable
-data class MetricsResponse(
-    val from: Long,
-    val to: Long,
-    val minutes: Long,
-    val count: Int,
-    val totalBytes: Long,
-    val items: List<MetricData>
-)
+// ---- JSON + fichero métricas ----
 
-@Serializable
-data class PeersResponse(val peers: List<String>)
-
-@Serializable
-data class KeepAliveResponse(val status: String)
-
-@Serializable
-data class OkResponse(val ok: Boolean)
-
-@Serializable
-data class ErrorResponse(val error: String)
-
-// ========= Globals =========
-
-// JSON bonito para disco
-val jsonPretty = Json { prettyPrint = true }
-// JSON compacto para SSE (¡sin saltos de línea!)
-val jsonCompact = Json { prettyPrint = false }
-
-val metricsFile = File("metricas.json")
-val metricsLock = ReentrantLock()
-
-// ========= Application =========
+private val jsonPretty = Json { prettyPrint = true }
+private val jsonCompact = Json { prettyPrint = false }
+private val metricsFile = File("metricas.json")
+private val metricsLock = ReentrantLock()
 
 fun Application.module() {
 
-    // Peers y SSE
     val peerTimestamps = ConcurrentHashMap<String, Long>()
     val timeoutMillis = 30_000L
     val sseClients = Collections.synchronizedSet(mutableSetOf<Writer>())
 
     install(ContentNegotiation) { json() }
 
-    // Limpieza periódica de peers inactivos
+    // Limpieza de peers inactivos
     launch {
         while (true) {
             val now = System.currentTimeMillis()
-            val toRemove = peerTimestamps.filterValues { now - it > timeoutMillis }.keys
-            toRemove.forEach {
+            val muertos = peerTimestamps.filterValues { now - it > timeoutMillis }.keys
+            muertos.forEach {
                 println("Peer eliminado por timeout: $it")
                 peerTimestamps.remove(it)
             }
@@ -90,115 +62,76 @@ fun Application.module() {
         }
     }
 
-    // ===== Helpers de métricas =====
-
     fun readAllMetrics(): List<MetricData> = metricsLock.withLock {
         if (!metricsFile.exists()) return emptyList()
-        return runCatching {
+
+        runCatching {
             val raw = metricsFile.readText()
-            if (raw.isBlank()) emptyList()
-            else jsonPretty.decodeFromString<List<MetricData>>(raw)
+            if (raw.isBlank()) {
+                emptyList()
+            } else {
+                jsonPretty.decodeFromString<List<MetricData>>(raw)
+            }
         }.getOrElse {
-            println("⚠️ Error leyendo metricas.json: ${it.message}")
             emptyList()
         }
     }
 
-    fun persistMetric(m: MetricData) = metricsLock.withLock {
-        val existing = readAllMetrics()
-        val updated = existing + m
-        // Escritura atómica: .tmp + rename
-        val tmp = File(metricsFile.parentFile ?: File("."), metricsFile.name + ".tmp")
-        tmp.writeText(jsonPretty.encodeToString(updated))
-        if (!tmp.renameTo(metricsFile)) {
-            // Fallback (Windows)
-            metricsFile.writeText(tmp.readText())
-            tmp.delete()
-        }
-    }
-
-    /**
-     * Emite un evento SSE nombrado 'metric' con JSON compacto.
-     * Si hubiera saltos de línea, cada línea se prefija con "data:" (cumple el spec).
-     */
-    fun broadcastSseMetric(metric: MetricData) {
-        val compact = jsonCompact.encodeToString(metric) // una sola línea
-        val sb = StringBuilder()
-        sb.append("event: metric\n")
-        // Por robustez, si alguna vez hubiera \n, enviamos múltiples líneas 'data:'
-        compact.split('\n').forEach { line ->
-            sb.append("data: ").append(line).append('\n')
-        }
-        sb.append('\n') // separador de evento
-        val payload = sb.toString()
-
-        val dead = mutableListOf<Writer>()
-        synchronized(sseClients) {
-            sseClients.forEach { w ->
-                runCatching {
-                    w.write(payload)
-                    w.flush()
-                }.onFailure { dead += w }
-            }
-            sseClients.removeAll(dead.toSet())
-        }
-    }
-
-    // ===== Rutas =====
 
     routing {
-        // Archivos estáticos (si los usas)
-        staticResources("/", "static") {}
-        staticResources("/hero", "hero") {}
-        staticResources("/sprite", "sprite") {}
+        // Estáticos (borra si no los usas)
+        staticResources("/", "static")
+        staticResources("/hero", "hero")
+        staticResources("/sprite", "sprite")
 
         // ---- Peers ----
+
         post("/register") {
-            val registration = call.receive<PeerRegistration>()
-            peerTimestamps[registration.id] = System.currentTimeMillis()
-            println("Peer registrado: ${registration.id}")
-            call.respond(HttpStatusCode.OK, PeersResponse(peerTimestamps.keys.toList()))
+            val reg = call.receive<PeerRegistration>()
+            peerTimestamps[reg.id] = System.currentTimeMillis()
+            println("Peer registrado: ${reg.id}")
+            call.respond(peerTimestamps.keys.toList())      // [ "peer1", "peer2", ... ]
         }
 
         post("/keep-alive") {
-            val registration = call.receive<PeerRegistration>()
-            if (peerTimestamps.containsKey(registration.id)) {
-                peerTimestamps[registration.id] = System.currentTimeMillis()
-                println("Keep-alive de: ${registration.id}")
-                call.respond(HttpStatusCode.OK, KeepAliveResponse("alive"))
+            val reg = call.receive<PeerRegistration>()
+            if (peerTimestamps.containsKey(reg.id)) {
+                peerTimestamps[reg.id] = System.currentTimeMillis()
+                println("Keep-alive de: ${reg.id}")
+                call.respond(mapOf("status" to "alive"))
             } else {
-                println("Keep-alive de peer no registrado: ${registration.id}")
-                call.respond(HttpStatusCode.NotFound, ErrorResponse("Peer not registered"))
+                println("Keep-alive de peer no registrado: ${reg.id}")
+                call.respond(HttpStatusCode.NotFound, mapOf("error" to "Peer not registered"))
             }
         }
 
         post("/unregister") {
-            val registration = call.receive<PeerRegistration>()
-            if (peerTimestamps.remove(registration.id) != null) {
-                println("Peer eliminado manualmente: ${registration.id}")
-            } else {
-                println("Intento de eliminar peer no registrado: ${registration.id}")
-            }
-            call.respond(HttpStatusCode.OK, PeersResponse(peerTimestamps.keys.toList()))
+            val reg = call.receive<PeerRegistration>()
+            if (peerTimestamps.remove(reg.id) != null)
+                println("Peer eliminado manualmente: ${reg.id}")
+            else
+                println("Intento de eliminar peer no registrado: ${reg.id}")
+            call.respond(peerTimestamps.keys.toList())
         }
 
         get("/peers") {
-            call.respond(HttpStatusCode.OK, PeersResponse(peerTimestamps.keys.toList()))
+            call.respond(peerTimestamps.keys.toList())
         }
 
         // ---- Histórico de métricas ----
+
         get("/metrics") {
             val minutes = call.request.queryParameters["minutes"]?.toLongOrNull() ?: 5L
             if (minutes <= 0) {
-                call.respond(HttpStatusCode.BadRequest, ErrorResponse("minutes must be > 0"))
+                call.respond(HttpStatusCode.BadRequest, mapOf("error" to "minutes must be > 0"))
                 return@get
             }
 
             val now = System.currentTimeMillis()
             val from = now - minutes * 60_000
 
-            val all = readAllMetrics()
-            val recent = all.asSequence()
+            val recent = readAllMetrics()
+                .asSequence()
                 .filter { it.time in from..now }
                 .sortedBy { it.time }
                 .toList()
@@ -206,19 +139,19 @@ fun Application.module() {
             val totalBytes = recent.sumOf { it.sizeBytes }
 
             call.respond(
-                HttpStatusCode.OK,
-                MetricsResponse(
-                    from = from,
-                    to = now,
-                    minutes = minutes,
-                    count = recent.size,
-                    totalBytes = totalBytes,
-                    items = recent
+                mapOf(
+                    "from" to from,
+                    "to" to now,
+                    "minutes" to minutes,
+                    "count" to recent.size,
+                    "totalBytes" to totalBytes,
+                    "items" to recent
                 )
             )
         }
 
         // ---- SSE en vivo ----
+
         get("/metrics/live") {
             call.response.cacheControl(CacheControl.NoCache(null))
             call.respondTextWriter(contentType = ContentType.Text.EventStream) {
@@ -226,7 +159,6 @@ fun Application.module() {
                 println("SSE conectado (${sseClients.size} clientes)")
                 try {
                     while (true) {
-                        // Comentario SSE como heartbeat (NO dispara 'message')
                         write(": keepalive\n\n")
                         flush()
                         delay(15_000)
@@ -238,24 +170,61 @@ fun Application.module() {
             }
         }
 
-        // ---- Ingesta de métricas ----
+        // ---- Ingesta de métricas + broadcast SSE ----
+
         post("/metric") {
             val metric = call.receive<MetricData>()
             val normalized = metric.copy(
                 source = metric.source.lowercase(),
                 sender = if (metric.source.lowercase() == "http") null else metric.sender
             )
-            persistMetric(normalized)
-            broadcastSseMetric(normalized) // <-- usa JSON compacto y data: por línea
-            call.respond(OkResponse(true))
+
+            // Guardar en fichero
+            metricsLock.withLock {
+                val updated = readAllMetrics() + normalized
+                val tmp = File(metricsFile.parentFile ?: File("."), metricsFile.name + ".tmp")
+                tmp.writeText(jsonPretty.encodeToString(updated))
+                if (!tmp.renameTo(metricsFile)) {
+                    metricsFile.writeText(tmp.readText())
+                    tmp.delete()
+                }
+            }
+
+            // Emitir por SSE
+            val compact = jsonCompact.encodeToString(normalized)
+            val payload = buildString {
+                append("event: metric\n")
+                compact.split('\n').forEach { line ->
+                    append("data: ").append(line).append('\n')
+                }
+                append('\n')
+            }
+
+            val muertos = mutableListOf<Writer>()
+            synchronized(sseClients) {
+                sseClients.forEach { w ->
+                    runCatching {
+                        w.write(payload)
+                        w.flush()
+                    }.onFailure { muertos += w }
+                }
+                sseClients.removeAll(muertos.toSet())
+            }
+
+            call.respond(mapOf("ok" to true))
         }
 
         // ---- Diagnóstico ----
+
         get("/_diag/metrics-file") {
-            val path = metricsFile.absolutePath
             val exists = metricsFile.exists()
-            val size = if (exists) metricsFile.length() else 0L
-            call.respond(mapOf("path" to path, "exists" to exists, "size" to size))
+            call.respond(
+                mapOf(
+                    "path" to metricsFile.absolutePath,
+                    "exists" to exists,
+                    "size" to if (exists) metricsFile.length() else 0L
+                )
+            )
         }
     }
 }

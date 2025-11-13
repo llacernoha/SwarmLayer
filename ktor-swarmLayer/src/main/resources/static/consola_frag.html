@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Mini Console (aligned columns, size left)</title>
+  <title>Global Fragment Console</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
   <style>
     :root { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
@@ -60,8 +60,7 @@
 </div>
 
 <script>
-  // --- Config ---
-  const MAX_LINES = 500;
+  const MAX_LINES = 500; // Máximas líneas en consola
 
   // Column widths (shared header + rows)
   const COL_TIME   = 10; // [HH:MM:SS]
@@ -120,7 +119,7 @@
     const c2 = `<span class="l ${srcClass}">${esc(srcRaw)}</span>${srcPad}`;
     const c3 = padEnd(sender,   COL_SENDER);
     const c4 = padEnd(receiver, COL_RECEIV);
-    const c5 = padEnd(sizeVal,  COL_SIZE); // ← now aligned left
+    const c5 = padEnd(sizeVal,  COL_SIZE);
     const c6 = `  ${frag}`;
 
     return `${esc(c1)}  ${c2}  ${esc(c3)}  ${esc(c4)}  ${esc(c5)}${esc(c6)}`;
