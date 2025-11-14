@@ -18,14 +18,11 @@ async function launchPeer() {
   // Navegar a la app
   await page.goto(APP_URL, { waitUntil: 'domcontentloaded' });
 
-  // Intentar mutear el vídeo si existe
+  // Intentar mutear el vídeo
   await page.evaluate(() => {
     const video = document.getElementById('video');
     if (!video) return;
     video.muted = true;
-    if (typeof video.play === 'function') {
-      video.play().catch(() => {});
-    }
   });
 
   // devolvemos el navegador para poder cerrarlo después
