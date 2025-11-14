@@ -18,6 +18,9 @@ import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.locks.ReentrantLock
 import kotlin.concurrent.withLock
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.encodeToJsonElement
 
 // ---- DTOs mínimos ----
 
@@ -31,13 +34,24 @@ data class MetricData(
     val sender: String? = null,
     val receiver: String,
     val time: Long,
-    val sizeBytes: Long
+    val sizeBytes: Long,
+    val peersWith: List<String> = emptyList(),
+    val peersWithFragments: List<String> = emptyList()
 )
+
 
 // ---- JSON + fichero métricas ----
 
-private val jsonPretty = Json { prettyPrint = true }
-private val jsonCompact = Json { prettyPrint = false }
+private val jsonPretty = Json {
+    prettyPrint = true
+    encodeDefaults = true
+}
+
+private val jsonCompact = Json {
+    prettyPrint = false
+    encodeDefaults = true
+}
+
 private val metricsFile = File("metricas.json")
 private val metricsLock = ReentrantLock()
 
@@ -138,17 +152,22 @@ fun Application.module() {
 
             val totalBytes = recent.sumOf { it.sizeBytes }
 
-            call.respond(
-                mapOf(
-                    "from" to from,
-                    "to" to now,
-                    "minutes" to minutes,
-                    "count" to recent.size,
-                    "totalBytes" to totalBytes,
-                    "items" to recent
-                )
-            )
+            // Convertimos la lista de MetricData a JsonElement
+            val itemsJson = jsonPretty.encodeToJsonElement(recent)
+
+            // Construimos el objeto JSON "a mano"
+            val payload = buildJsonObject {
+                put("from", from)
+                put("to", now)
+                put("minutes", minutes)
+                put("count", recent.size)
+                put("totalBytes", totalBytes)
+                put("items", itemsJson)
+            }
+
+            call.respond(payload)
         }
+
 
         // ---- SSE en vivo ----
 

@@ -12,6 +12,8 @@ const HEARTBEAT_INTERVAL = 15000;
 const HEARTBEAT_TIMEOUT = 20000;
 const SERVER_KEEPALIVE_INTERVAL = 20000;
 
+const temp_metrics = new Map();
+
 // Instanciación PeerJS
 const peer = new Peer(undefined, {
     host: 'dashp2p.infinitebuffer.com',
@@ -60,6 +62,17 @@ peer.on('open', async id => {
                 console.warn('Peer no responde, cerrando conexión:', peerId);
                 peerData.conn.close();
             }
+
+            try {
+                const livePeers = Array.from(connections.keys());
+                navigator.serviceWorker.controller?.postMessage({
+                    type: 'livePeers',
+                    peers: livePeers
+                });
+            } catch (e) {
+                //
+            }
+
         });
     }, HEARTBEAT_INTERVAL);
 });
@@ -144,9 +157,7 @@ function setupConnection(conn, remoteId) {
                         await cache.put(url, new Response(buffer, { headers: { 'Content-Type': 'application/octet-stream' } }));
 
                         navigator.serviceWorker.controller?.postMessage({ type: 'p2p-fragment-received', url });
-                        console.log(`${url}, p2p, ${remoteId}, ${peer_id}, ${Date.now()}, ${size}`);
-
-                        await sendMetric({ fragmentUrl: url, source: 'p2p', sender: remoteId, receiver: peer_id, time: Date.now(), sizeBytes: size });
+                        //console.log(`${url}, p2p, ${remoteId}, ${peer_id}, ${Date.now()}, ${size}`);
 
                         // Enviar inventario tras recibir por P2P
                         const localInventory = await getLocalInventory();
@@ -156,6 +167,10 @@ function setupConnection(conn, remoteId) {
                         wrap.setInventory(inv);
                         const bin = wrap.serializeBinary();
                         for (const value of connections.values()) value.conn.send(bin);
+
+                        await sendMetric({ fragmentUrl: url, source: 'p2p', sender: remoteId, receiver: peer_id, time: Date.now(), sizeBytes: size, peersWith: temp_metrics.get(url).peersWith, peersWithFragments: temp_metrics.get(url).peersWithFragments });
+                        temp_metrics.delete(url);
+
 
                         break;
                     }
@@ -240,6 +255,10 @@ navigator.serviceWorker?.addEventListener('message', async (event) => {
 
             connections.get(data.peerId)?.conn.send(wrapper.serializeBinary());
             //console.log(`Fragmento p2p solicitado a: ${data.peerId} con url: ${data.url}`);
+            let peersWith = data.peersWith;
+            let peersWithFragments = data.peersWithFragments;
+            temp_metrics.set(data.url, { peersWith, peersWithFragments });
+
 
 
             break;
@@ -257,9 +276,9 @@ navigator.serviceWorker?.addEventListener('message', async (event) => {
             for (const value of connections.values()) {
                 value.conn.send(bin);
             }
-            console.log(`${data.url}, http, -, ${peer_id}, ${Date.now()}, ${data.size}`);
+            //console.log(`${data.url}, http, -, ${peer_id}, ${Date.now()}, ${data.size}`);
 
-            await sendMetric({ fragmentUrl: data.url, source: 'http', sender: '', receiver: peer_id, time: Date.now(), sizeBytes: data.size });
+            await sendMetric({ fragmentUrl: data.url, source: 'http', sender: '', receiver: peer_id, time: Date.now(), sizeBytes: data.size, peersWith: data.peersWith, peersWithFragments: data.peersWithFragments });
             break;
     }
 

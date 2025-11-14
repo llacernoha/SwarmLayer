@@ -25,15 +25,17 @@ self.addEventListener('fetch', event => {
 
         // 2) Buscar peers que lo tienen
         const peersWith = [];
+        const peersWithFragments = [];
         peerInventory.forEach((urls, peerId) => {
             if (urls.has(url)) peersWith.push(peerId);
+            peersWithFragments.push(peerId);
         });
 
         // 3) Si hay peers, solicitamos y esperamos
         if (peersWith.length > 0) {
             const peerId = peersWith[Math.floor(Math.random() * peersWith.length)];
 
-            postMessage({ type: 'p2p-fragment-request', url, peerId });
+            postMessage({ type: 'p2p-fragment-request', url, peerId, peersWith, peersWithFragments });
 
             try {
                 // Esperar hasta 2 segundos a que el fragmento llegue a caché
@@ -76,7 +78,7 @@ self.addEventListener('fetch', event => {
         }
 
         // Notificar fragmento recibido
-        postMessage({ type: 'http-fragment-received', url, size });
+        postMessage({ type: 'http-fragment-received', url, size, peersWith, peersWithFragments });
 
         return resp;
     })());
@@ -100,6 +102,17 @@ self.addEventListener('message', async event => {
         case 'peer-disconnected':
             peerInventory.delete(data.peerId);
             break;
+
+        case 'livePeers': {
+            const live = new Set(data.peers || []);
+            for (const peerId of peerInventory.keys()) {
+                if (!live.has(peerId)) {
+                    peerInventory.delete(peerId);
+                }
+            }
+            break;
+        }
     }
+
 
 });

@@ -23,7 +23,15 @@
     #stats { margin-left: auto; opacity: .9; font-size: 12px; border: none; padding: 0; background: transparent; }
 
     #consoleWrap { height: calc(100vh - 56px); overflow: auto; }
-    pre { margin: 0; padding: 0 16px 12px 16px; white-space: pre; line-height: 1.35; }
+
+    /* pre de la consola sin padding (lo añaden las líneas) */
+    pre {
+      margin: 0;
+      padding: 0;
+      white-space: pre;
+      line-height: 1.35;
+    }
+
     #consoleHead {
       position: sticky; top: 0;
       background: #0b0f14;
@@ -31,10 +39,54 @@
       border-bottom: 1px dashed #1f2937;
       z-index: 1;
     }
+
     #console { padding-top: 8px; }
+
+    /* línea individual de la consola */
+    .console-line {
+      display: block;
+      padding: 0 16px;
+      transition: background-color 80ms ease-out;
+    }
+
+    /* zebra más visible pero aún discreta */
+    .console-line:nth-child(odd) {
+      background-color: #020617;  /* un pelín más oscuro */
+    }
+    .console-line:nth-child(even) { background-color: #111827; }
+
+    /* highlight suave al pasar el ratón */
+    .console-line:hover {
+      background-color: #111827;
+    }
 
     .l.http { color: #60a5fa; }
     .l.p2p  { color: #22c55e; }
+
+    .peer-list {
+      font-size: 10px;
+      opacity: 0.9;
+    }
+
+    .peer {
+      color: #e5e7eb; /* blanco suave */
+    }
+
+    /* tiene ESTE fragmento */
+    .peer-has {
+      color: #ffffff; /* blanco puro */
+    }
+
+    /* NO tiene este fragmento, solo otros */
+    .peer-miss {
+      color: #9ca3af; /* gris (Tailwind gray-400) */
+    }
+
+    /* el peer que realmente envía el fragmento */
+    .peer-main {
+      color: #22c55e; /* verde (Tailwind green-500) */
+      font-weight: bold;
+    }
   </style>
 </head>
 <body>
@@ -67,9 +119,9 @@
   const COL_SRC    = 6;  // HTTP/P2P
   const COL_SENDER = 45; // sender id
   const COL_RECEIV = 45; // receiver id
-  const COL_SIZE   = 10; // size left-aligned
-
-  // --- State ---
+  const COL_SIZE   = 10; // size
+  const COL_PEERS  = 25;
+  // --- State --->
   let windowMinutes = 5;
   let items = [];
   let lines = [];
@@ -95,34 +147,96 @@
 
   // --- Header (same alignment as rows) ---
   function headerText(){
-    const h1 = padEnd('time', COL_TIME);
-    const h2 = padEnd('type', COL_SRC);
-    const h3 = padEnd('sender', COL_SENDER);
-    const h4 = padEnd('receiver', COL_RECEIV);
-    const h5 = padEnd('size', COL_SIZE); // left-aligned now
-    const h6 = '  fragment';
-    return `${h1}  ${h2}  ${h3}  ${h4}  ${h5}${h6}`;
+    const h1 = padEnd('time',    COL_TIME);
+    const h2 = padEnd('type',    COL_SRC);
+    const h3 = padEnd('sender',  COL_SENDER);
+    const h4 = padEnd('receiver',COL_RECEIV);
+    const h5 = padEnd('size',    COL_SIZE); // left-aligned
+    const h6 = padEnd('peers',   COL_PEERS); // all/have
+    const h7 = '  fragment';
+    return `${h1}  ${h2}  ${h3}  ${h4}  ${h5}  ${h6}${h7}`;
   }
 
   // --- Row formatting ---
   function lineText(m){
     const time = `[${fmtTime(m.time)}]`;
-    const srcRaw = (m.source || '').toUpperCase();
-    const srcClass = (m.source || '').toLowerCase() === 'http' ? 'http' : 'p2p';
-    const sender = (m.source || '').toLowerCase() === 'http' ? '-' : (m.sender || '-');
+    const srcRaw   = (m.source || '').toUpperCase();
+    const srcLower = (m.source || '').toLowerCase();
+    const srcClass = srcLower === 'http' ? 'http' : 'p2p';
+    const sender   = srcLower === 'http' ? '-' : (m.sender || '-');
     const receiver = m.receiver || '-';
-    const sizeVal = fmtBytes(m.sizeBytes);
-    const frag = m.fragmentUrl || '';
+    const sizeVal  = fmtBytes(m.sizeBytes);
+    const frag     = m.fragmentUrl || '';
 
-    const c1 = padEnd(time, COL_TIME);
+    // --- peers summary ---
+    const hasFragArr  = Array.isArray(m.peersWith) ? m.peersWith : [];
+    const allPeersArr = Array.isArray(m.peersWithFragments) ? m.peersWithFragments : [];
+
+    const hasFragSet  = new Set(hasFragArr);
+    const allPeers    = allPeersArr;
+    const usedPeer    = (srcLower === 'p2p' && m.sender) ? m.sender : null;
+
+    const peersSummary = `${hasFragArr.length}/${allPeers.length}`;
+
+    // mini-peers: cortamos a 3 chars cada uno
+    const shortPeers = allPeers.map(p => {
+      const fullId  = String(p);
+      const shortId = fullId.slice(0, 3);
+
+      const classes = ['peer'];
+      if (hasFragSet.has(p)) classes.push('peer-has');
+      else classes.push('peer-miss');
+      if (usedPeer && p === usedPeer) classes.push('peer-main');
+
+      return { fullId, shortId, classes };
+    });
+
+    // Construimos el HTML de la columna peers y calculamos su longitud visible
+    let peersHtmlPieces = [];
+    peersHtmlPieces.push(esc(peersSummary));
+
+    if (shortPeers.length > 0) {
+      // espacio entre summary y primer peer
+      peersHtmlPieces.push(' ');
+    }
+
+    shortPeers.forEach((peer, idx) => {
+      if (idx > 0) peersHtmlPieces.push(' '); // espacio entre peers
+
+      peersHtmlPieces.push(
+              `<span class="${peer.classes.join(' ')}" title="${esc(peer.fullId)}">${esc(peer.shortId)}</span>`
+      );
+    });
+
+    // longitud visible (sin tags HTML): len(summary) + 4*n
+    const visibleLen = peersSummary.length + 4 * shortPeers.length;
+    const extraSpaces = Math.max(0, COL_PEERS - visibleLen);
+
+    const peersColHtml = peersHtmlPieces.join('') + ' '.repeat(extraSpaces);
+
+    // --- resto de columnas ---
+    const c1 = padEnd(time,      COL_TIME);
     const srcPad = ' '.repeat(Math.max(0, COL_SRC - srcRaw.length));
     const c2 = `<span class="l ${srcClass}">${esc(srcRaw)}</span>${srcPad}`;
-    const c3 = padEnd(sender,   COL_SENDER);
-    const c4 = padEnd(receiver, COL_RECEIV);
-    const c5 = padEnd(sizeVal,  COL_SIZE);
-    const c6 = `  ${frag}`;
+    const c3 = padEnd(sender,    COL_SENDER);
+    const c4 = padEnd(receiver,  COL_RECEIV);
+    const c5 = padEnd(sizeVal,   COL_SIZE);
 
-    return `${esc(c1)}  ${c2}  ${esc(c3)}  ${esc(c4)}  ${esc(c5)}${esc(c6)}`;
+    const c7 = `  ${frag}`;
+
+    // peersColHtml ya lleva su propio padding a COL_PEERS
+    const firstLine =
+            `${esc(c1)}  ${c2}  ${esc(c3)}  ${esc(c4)}  ${esc(c5)}  ${peersColHtml}${esc(c7)}`;
+
+    return firstLine;
+  }
+
+  // --- Render helper para aplicar zebra ---
+  function renderLines() {
+    const html = lines
+            .map(l => `<span class="console-line">${l}</span>`)
+            .join('');
+    $console.innerHTML = html;
   }
 
   // --- Stats + rendering ---
@@ -154,7 +268,7 @@
     needsRender = true;
     requestAnimationFrame(()=>{
       const atBottom = $wrap.scrollTop + $wrap.clientHeight >= $wrap.scrollHeight - 8;
-      $console.innerHTML = lines.join('<br>');
+      renderLines();
       needsRender = false;
       if(atBottom) $wrap.scrollTop = $wrap.scrollHeight;
       renderStats();
@@ -172,7 +286,7 @@
     for(let i=start;i<items.length;i++) lines.push(lineText(items[i]));
 
     renderHeader();
-    $console.innerHTML = lines.join('<br>');
+    renderLines();
     $wrap.scrollTop = $wrap.scrollHeight;
     renderStats();
   }
