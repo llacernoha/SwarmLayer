@@ -103,7 +103,7 @@ self.addEventListener('message', async event => {
             peerInventory.delete(data.peerId);
             break;
 
-        case 'livePeers': {
+        case 'live-peers': {
             const live = new Set(data.peers || []);
             for (const peerId of peerInventory.keys()) {
                 if (!live.has(peerId)) {

@@ -59,14 +59,13 @@ peer.on('open', async id => {
             }
 
             if (now - peerData.lastHeartbeat > HEARTBEAT_TIMEOUT) {
-                console.warn('Peer no responde, cerrando conexión:', peerId);
                 peerData.conn.close();
             }
 
             try {
                 const livePeers = Array.from(connections.keys());
                 navigator.serviceWorker.controller?.postMessage({
-                    type: 'livePeers',
+                    type: 'live-peers',
                     peers: livePeers
                 });
             } catch (e) {
@@ -81,13 +80,28 @@ peer.on('open', async id => {
 peer.on('connection', conn => setupConnection(conn, conn.peer));
 
 // Funciones servidor
-function registerPeer(id) {
-    fetch('https://dashp2p.infinitebuffer.com/ktor/register', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id })
-    });
+async function setInfo() {
+    if (!peer_id) return;  // asegurarnos de que el peer existe
+
+    // Obtener la MPD directamente del DOM sin funciones intermedias
+    const select = document.getElementById('mpd-select');
+    const mpd = select ? select.value : null;
+
+    // Enviar la información al servidor
+    try {
+        await fetch('https://dashp2p.infinitebuffer.com/ktor/set-info', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                id: peer_id,
+                mpd: mpd
+            })
+        });
+    } catch (err) {
+        //
+    }
 }
+
 
 function sendKeepAlive(id) {
     fetch('https://dashp2p.infinitebuffer.com/ktor/keep-alive', {
