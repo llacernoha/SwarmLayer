@@ -12,20 +12,59 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
-import java.io.File
-import java.io.Writer
-import java.util.Collections
-import java.util.concurrent.ConcurrentHashMap
-import java.util.concurrent.locks.ReentrantLock
-import kotlin.concurrent.withLock
+import kotlinx.serialization.decodeFromString
+import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.encodeToJsonElement
+import java.io.File
+import java.io.Writer
+import java.util.Collections
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
-// ---- DTOs mínimos ----
+// -------- CONFIGURACIÓN DE GRUPOS --------
 
 @Serializable
-data class PeerRegistration(val id: String)
+data class GroupConfig(val mpds: List<String>, val maxNodes: Int)
+
+// se carga desde group-config.json
+lateinit var groupConfig: Map<String, GroupConfig>
+
+// -------- ESTADO DE GRUPOS --------
+
+data class PeerEntry(val id: String, val timestamp: Long)
+
+/*
+groupState = {
+  "0" : {
+      "00": [PeerEntry, PeerEntry],
+      "01": [...]
+  },
+  "1" : {...}
+}
+*/
+val groupState = mutableMapOf<String, MutableMap<String, MutableList<PeerEntry>>>()
+val groupLock = ReentrantLock()
+
+
+// ----------------------------
+// MÉTRICAS
+// ----------------------------
+
+private val jsonPretty = Json { prettyPrint = true; encodeDefaults = true }
+private val jsonCompact = Json { prettyPrint = false; encodeDefaults = true }
+
+private val metricsFile = File("metricas.json")
+private val metricsLock = ReentrantLock()
+
+
+// ----------------------------
+// DTO de entrada
+// ----------------------------
+
+@Serializable
+data class PeerInfoRequest(val id: String, val mpd: String)
 
 @Serializable
 data class MetricData(
@@ -36,108 +75,131 @@ data class MetricData(
     val time: Long,
     val sizeBytes: Long,
     val peersWith: List<String> = emptyList(),
-    val peersWithFragments: List<String> = emptyList()
+    val peersWithFragments: List<String> = emptyList(),
+    val type: String? = null,
+    val groupId: String? = null
 )
 
 
-// ---- JSON + fichero métricas ----
-
-private val jsonPretty = Json {
-    prettyPrint = true
-    encodeDefaults = true
-}
-
-private val jsonCompact = Json {
-    prettyPrint = false
-    encodeDefaults = true
-}
-
-private val metricsFile = File("metricas.json")
-private val metricsLock = ReentrantLock()
+// ======================================================================
+// APPLICATION MODULE
+// ======================================================================
 
 fun Application.module() {
 
-    val peerTimestamps = ConcurrentHashMap<String, Long>()
-    val timeoutMillis = 30_000L
-    val sseClients = Collections.synchronizedSet(mutableSetOf<Writer>())
-
     install(ContentNegotiation) { json() }
 
-    // Limpieza de peers inactivos
+    // cargar configuración de grupos desde group-config.json (mismo directorio que el .jar)
+    val cfgFile = File("group-config.json")
+    if (!cfgFile.exists()) error("NO existe group-config.json en el directorio del servidor")
+
+    groupConfig = Json.decodeFromString(cfgFile.readText())
+
+    println("<<< CONFIGURACIÓN DE GRUPOS CARGADA >>>")
+    println(jsonPretty.encodeToString(groupConfig))
+
+    // limpieza periódica por timeout usando timestamps de PeerEntry
     launch {
         while (true) {
-            val now = System.currentTimeMillis()
-            val muertos = peerTimestamps.filterValues { now - it > timeoutMillis }.keys
-            muertos.forEach {
-                println("Peer eliminado por timeout: $it")
-                peerTimestamps.remove(it)
-            }
-            delay(5_000)
+            purgeDeadPeers()
+            delay(10_000)
         }
     }
+
+
+    val sseClients = Collections.synchronizedSet(mutableSetOf<Writer>())
+
 
     fun readAllMetrics(): List<MetricData> = metricsLock.withLock {
         if (!metricsFile.exists()) return emptyList()
-
-        runCatching {
-            val raw = metricsFile.readText()
-            if (raw.isBlank()) {
-                emptyList()
-            } else {
-                jsonPretty.decodeFromString<List<MetricData>>(raw)
-            }
-        }.getOrElse {
-            emptyList()
-        }
+        val raw = metricsFile.readText()
+        if (raw.isBlank()) emptyList()
+        else runCatching { jsonPretty.decodeFromString<List<MetricData>>(raw) }.getOrElse { emptyList() }
     }
 
 
+    // =============================================================
+    // RUTAS
+    // =============================================================
+
     routing {
-        // Estáticos (borra si no los usas)
+
+        // Archivos estáticos
         staticResources("/", "static")
         staticResources("/hero", "hero")
         staticResources("/sprite", "sprite")
 
-        // ---- Peers ----
+        // =========================================================
+        // --------------        /set-info        -------------------
+        // =========================================================
+        post("/set-info") {
+            val req = call.receive<PeerInfoRequest>()
+            val now = System.currentTimeMillis()
 
-        post("/register") {
-            val reg = call.receive<PeerRegistration>()
-            peerTimestamps[reg.id] = System.currentTimeMillis()
-            println("Peer registrado: ${reg.id}")
-            call.respond(peerTimestamps.keys.toList())      // [ "peer1", "peer2", ... ]
-        }
-
-        post("/keep-alive") {
-            val reg = call.receive<PeerRegistration>()
-            if (peerTimestamps.containsKey(reg.id)) {
-                peerTimestamps[reg.id] = System.currentTimeMillis()
-                println("Keep-alive de: ${reg.id}")
-                call.respond(mapOf("status" to "alive"))
-            } else {
-                println("Keep-alive de peer no registrado: ${reg.id}")
-                call.respond(HttpStatusCode.NotFound, mapOf("error" to "Peer not registered"))
+            // 1) type según MPD
+            val targetType = findTypeForMpd(req.mpd)
+            if (targetType == null) {
+                call.respond(HttpStatusCode.BadRequest, "MPD no soportada")
+                return@post
             }
+
+            val (finalType, finalGroupId, peersInGroup) = groupLock.withLock {
+                // ¿Existe ya la id en algún grupo?
+                val currentLoc = findPeerLocationUnsafe(req.id)
+
+                if (currentLoc == null) {
+                    // CASO A: peer NUEVO -> ubicar donde haga falta
+                    val gid = assignPeerToTypeUnsafe(req.id, targetType, now)
+                    val peers = groupState[targetType]!![gid]!!.map { it.id }
+                    Triple(targetType, gid, peers)
+                } else {
+                    val (currentType, currentGroupId) = currentLoc
+
+                    if (currentType == targetType) {
+                        // CASO B: la id existe y sigue en el type que debe -> NO mover, solo actualizar timestamp
+                        val list = groupState[currentType]!![currentGroupId]!!
+                        val idx = list.indexOfFirst { it.id == req.id }
+                        if (idx >= 0) {
+                            list[idx] = list[idx].copy(timestamp = now)
+                        }
+                        val peers = list.map { it.id }
+                        Triple(currentType, currentGroupId, peers)
+                    } else {
+                        // CASO C: la id existe pero NO está en el type correcto
+                        // 1) eliminar del sitio donde estaba
+                        val oldGroups = groupState[currentType]!!
+                        val oldList = oldGroups[currentGroupId]!!
+                        oldList.removeIf { it.id == req.id }
+                        if (oldList.isEmpty()) {
+                            oldGroups.remove(currentGroupId)
+                            if (oldGroups.isEmpty()) {
+                                groupState.remove(currentType)
+                            }
+                        }
+
+                        // 2) reubicar en el type que debe, sin tocar otras ids
+                        val gid = assignPeerToTypeUnsafe(req.id, targetType, now)
+                        val peers = groupState[targetType]!![gid]!!.map { it.id }
+                        Triple(targetType, gid, peers)
+                    }
+                }
+            }
+
+            println("SET-INFO >>> Peer=${req.id}, Type=$finalType, Group=$finalGroupId, Peers=$peersInGroup")
+
+            call.respond(peersInGroup)
         }
 
-        post("/unregister") {
-            val reg = call.receive<PeerRegistration>()
-            if (peerTimestamps.remove(reg.id) != null)
-                println("Peer eliminado manualmente: ${reg.id}")
-            else
-                println("Intento de eliminar peer no registrado: ${reg.id}")
-            call.respond(peerTimestamps.keys.toList())
-        }
 
-        get("/peers") {
-            call.respond(peerTimestamps.keys.toList())
-        }
 
-        // ---- Histórico de métricas ----
+        // =========================================================
+        //                        MÉTRICAS
+        // =========================================================
 
         get("/metrics") {
-            val minutes = call.request.queryParameters["minutes"]?.toLongOrNull() ?: 5L
+            val minutes = call.request.queryParameters["minutes"]?.toLongOrNull() ?: 5
             if (minutes <= 0) {
-                call.respond(HttpStatusCode.BadRequest, mapOf("error" to "minutes must be > 0"))
+                call.respond(HttpStatusCode.BadRequest, "minutes debe ser > 0")
                 return@get
             }
 
@@ -145,17 +207,12 @@ fun Application.module() {
             val from = now - minutes * 60_000
 
             val recent = readAllMetrics()
-                .asSequence()
                 .filter { it.time in from..now }
                 .sortedBy { it.time }
-                .toList()
 
             val totalBytes = recent.sumOf { it.sizeBytes }
-
-            // Convertimos la lista de MetricData a JsonElement
             val itemsJson = jsonPretty.encodeToJsonElement(recent)
 
-            // Construimos el objeto JSON "a mano"
             val payload = buildJsonObject {
                 put("from", from)
                 put("to", now)
@@ -169,13 +226,11 @@ fun Application.module() {
         }
 
 
-        // ---- SSE en vivo ----
-
         get("/metrics/live") {
             call.response.cacheControl(CacheControl.NoCache(null))
             call.respondTextWriter(contentType = ContentType.Text.EventStream) {
                 synchronized(sseClients) { sseClients += this }
-                println("SSE conectado (${sseClients.size} clientes)")
+                println("SSE conectado (${sseClients.size})")
                 try {
                     while (true) {
                         write(": keepalive\n\n")
@@ -184,21 +239,32 @@ fun Application.module() {
                     }
                 } finally {
                     synchronized(sseClients) { sseClients -= this }
-                    println("SSE desconectado (${sseClients.size} clientes)")
+                    println("SSE desconectado (${sseClients.size})")
                 }
             }
         }
 
-        // ---- Ingesta de métricas + broadcast SSE ----
 
         post("/metric") {
             val metric = call.receive<MetricData>()
+
+            // 1) localizar al peer receiver en la estructura de grupos
+            val (peerType, peerGroupId) = groupLock.withLock {
+                // findPeerLocationUnsafe devuelve Pair(type, groupId) o null
+                findPeerLocationUnsafe(metric.receiver) ?: ("unknown" to "unknown")
+            }
+
+            val src = metric.source.lowercase()
+
+            // 2) normalizar + añadir type y groupId
             val normalized = metric.copy(
-                source = metric.source.lowercase(),
-                sender = if (metric.source.lowercase() == "http") null else metric.sender
+                source = src,
+                sender = if (src == "http") null else metric.sender,
+                type = peerType,
+                groupId = peerGroupId
             )
 
-            // Guardar en fichero
+            // 3) guardar en metricas.json como antes
             metricsLock.withLock {
                 val updated = readAllMetrics() + normalized
                 val tmp = File(metricsFile.parentFile ?: File("."), metricsFile.name + ".tmp")
@@ -209,7 +275,7 @@ fun Application.module() {
                 }
             }
 
-            // Emitir por SSE
+            // 4) enviar por SSE igual que antes
             val compact = jsonCompact.encodeToString(normalized)
             val payload = buildString {
                 append("event: metric\n")
@@ -232,18 +298,96 @@ fun Application.module() {
 
             call.respond(mapOf("ok" to true))
         }
+    }
+}
 
-        // ---- Diagnóstico ----
 
-        get("/_diag/metrics-file") {
-            val exists = metricsFile.exists()
-            call.respond(
-                mapOf(
-                    "path" to metricsFile.absolutePath,
-                    "exists" to exists,
-                    "size" to if (exists) metricsFile.length() else 0L
-                )
-            )
+
+fun findTypeForMpd(mpd: String): String? {
+    return groupConfig.entries.firstOrNull { (_, cfg) ->
+        mpd in cfg.mpds
+    }?.key
+}
+
+/** Buscar dónde está un peer: devuelve (type, groupId) o null.
+ *  IMPORTANTE: llamar solo dentro de groupLock.withLock.
+ */
+fun findPeerLocationUnsafe(peerId: String): Pair<String, String>? {
+    for ((type, groups) in groupState) {
+        for ((groupId, list) in groups) {
+            if (list.any { it.id == peerId }) {
+                return type to groupId
+            }
         }
+    }
+    return null
+}
+
+private fun suffixIndex(groupId: String, type: String): Int {
+    return groupId.removePrefix(type).toIntOrNull() ?: Int.MAX_VALUE
+}
+
+/**
+ * Mete un peer en el type indicado:
+ * - Busca grupo de ese type con hueco, empezando por el de menor número
+ * - Si no hay, crea grupo nuevo con el menor índice libre:
+ *      type=0 -> 00, 01, 02...
+ *      type=1 -> 10, 11, 12...
+ * Se asume que se llama dentro de groupLock.withLock.
+ * Devuelve el groupId donde ha quedado.
+ */
+fun assignPeerToTypeUnsafe(peerId: String, type: String, now: Long): String {
+    val cfg = groupConfig[type] ?: error("No hay configuración para type=$type")
+
+    val typeGroups = groupState.getOrPut(type) { mutableMapOf() }
+
+    // 1) buscar grupo con hueco, ordenado por índice (00,01,02... / 10,11,12...)
+    val sortedGroupIds = typeGroups.keys.sortedBy { suffixIndex(it, type) }
+    for (gid in sortedGroupIds) {
+        val peers = typeGroups[gid]!!
+        if (peers.size < cfg.maxNodes) {
+            // por si ya estaba, lo quitamos y lo volvemos a meter con timestamp nuevo
+            peers.removeIf { it.id == peerId }
+            peers.add(PeerEntry(peerId, now))
+            return gid
+        }
+    }
+
+    // 2) no hay grupos con hueco -> crear grupo nuevo con el menor índice libre
+    val usedIndices = typeGroups.keys
+        .mapNotNull { suffixIndex(it, type).takeIf { idx -> idx != Int.MAX_VALUE } }
+        .toMutableSet()
+
+    var idx = 0
+    while (idx in usedIndices) idx++
+
+    val newGroupId = type + idx.toString()   // "0"+"0" = "00", "1"+"0"="10", etc.
+    typeGroups[newGroupId] = mutableListOf(PeerEntry(peerId, now))
+    return newGroupId
+}
+
+/** Limpia peers por timeout y borra grupos vacíos. */
+fun purgeDeadPeers() {
+    val now = System.currentTimeMillis()
+    val timeout = 20_000L
+
+    groupLock.withLock {
+        val emptyTypes = mutableListOf<String>()
+
+        groupState.forEach { (type, groups) ->
+            val emptyGroups = mutableListOf<String>()
+
+            groups.forEach { (groupId, list) ->
+                list.removeIf { now - it.timestamp > timeout }
+                if (list.isEmpty()) {
+                    emptyGroups.add(groupId)
+                }
+            }
+
+            emptyGroups.forEach { gid -> groups.remove(gid) }
+            if (groups.isEmpty()) emptyTypes.add(type)
+        }
+
+        emptyTypes.forEach { t -> groupState.remove(t) }
     }
 }

@@ -10,7 +10,7 @@ var peer_id = null;
 
 const HEARTBEAT_INTERVAL = 15000;
 const HEARTBEAT_TIMEOUT = 20000;
-const SERVER_KEEPALIVE_INTERVAL = 20000;
+const SERVER_KEEPALIVE_INTERVAL = 5000;
 
 const temp_metrics = new Map();
 
@@ -40,40 +40,40 @@ peer.on('open', async id => {
     console.log("Peer abierto con ID:", id);
     document.getElementById('my-id').innerText = id;
 
-    await registerPeer(id);
-    connectAllPeers();
+    await setInfo();
 
-    setInterval(() => sendKeepAlive(id), SERVER_KEEPALIVE_INTERVAL);
+    setInterval(setInfo, SERVER_KEEPALIVE_INTERVAL);
 
     // Ping-Pong entre peers
-    setInterval(() => {
-        const now = Date.now();
+    // setInterval(() => {
+    //     const now = Date.now();
+    //
+    //     connections.forEach((peerData, peerId) => {
+    //         if (peerData.conn.open) {
+    //             const pingMsg = new proto.ping();
+    //             pingMsg.setSecnumber(1);
+    //             const wrapper = new proto.swarmLayerMessage();
+    //             wrapper.setPing(pingMsg);
+    //             peerData.conn.send(wrapper.serializeBinary());
+    //         }
+    //
+    //         if (now - peerData.lastHeartbeat > HEARTBEAT_TIMEOUT) {
+    //             peerData.conn.close();
+    //         }
+    //
+    //         try {
+    //             const livePeers = Array.from(connections.keys());
+    //             navigator.serviceWorker.controller?.postMessage({
+    //                 type: 'live-peers',
+    //                 peers: livePeers
+    //             });
+    //         } catch (e) {
+    //             //
+    //         }
+    //
+    //     });
+    // }, HEARTBEAT_INTERVAL);
 
-        connections.forEach((peerData, peerId) => {
-            if (peerData.conn.open) {
-                const pingMsg = new proto.ping();
-                pingMsg.setSecnumber(1);
-                const wrapper = new proto.swarmLayerMessage();
-                wrapper.setPing(pingMsg);
-                peerData.conn.send(wrapper.serializeBinary());
-            }
-
-            if (now - peerData.lastHeartbeat > HEARTBEAT_TIMEOUT) {
-                peerData.conn.close();
-            }
-
-            try {
-                const livePeers = Array.from(connections.keys());
-                navigator.serviceWorker.controller?.postMessage({
-                    type: 'live-peers',
-                    peers: livePeers
-                });
-            } catch (e) {
-                //
-            }
-
-        });
-    }, HEARTBEAT_INTERVAL);
 });
 
 // Conexión entrante siendo conn el objeto PeerJS que representa DataChannel y conn.peer la id del peer remoto
@@ -81,6 +81,7 @@ peer.on('connection', conn => setupConnection(conn, conn.peer));
 
 // Funciones servidor
 async function setInfo() {
+
     if (!peer_id) return;  // asegurarnos de que el peer existe
 
     // Obtener la MPD directamente del DOM sin funciones intermedias
@@ -89,7 +90,7 @@ async function setInfo() {
 
     // Enviar la información al servidor
     try {
-        await fetch('https://dashp2p.infinitebuffer.com/ktor/set-info', {
+        const res = await fetch('https://dashp2p.infinitebuffer.com/ktor/set-info', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -97,31 +98,49 @@ async function setInfo() {
                 mpd: mpd
             })
         });
+
+        if (!res.ok) return;
+
+        const peers = await res.json(); // peers = array de peerIds que el servidor considera vivos
+        if (!Array.isArray(peers)) return;
+
+        // 1) Conectarse a nuevos peers que aparezcan en la lista del servidor
+        peers.forEach(peerId => {
+            // no conectarse a uno mismo
+            if (peerId === peer_id) return;
+
+            // si ya tenemos conexión con ese peer, no hacer nada
+            if (connections.has(peerId)) return;
+
+            // si no hay conexión, crearla
+            const conn = peer.connect(peerId);
+            setupConnection(conn, peerId);
+        });
+        const livePeers = Array.from(connections.keys());
+        console.log(livePeers);
+        navigator.serviceWorker.controller?.postMessage({
+            type: 'live-peers',
+            peers: livePeers
+        });
+
+        // 2) Cerrar conexiones que ya no estén en la lista del servidor
+        const liveSet = new Set(peers);
+        connections.forEach((peerData, peerId) => {
+            // si este peer conectado no está en la lista, cerramos su conexión
+            if (!liveSet.has(peerId)) {
+                try {
+                    if (peerData.conn.open) {
+                        peerData.conn.close(); // el on('close') de setupConnection se encargará de limpiar el Map y avisar al SW
+                    }
+                } catch (e) {
+                    //
+                }
+            }
+        });
+
     } catch (err) {
         //
     }
-}
-
-
-function sendKeepAlive(id) {
-    fetch('https://dashp2p.infinitebuffer.com/ktor/keep-alive', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ id })
-    });
-}
-
-function connectAllPeers() {
-    fetch('https://dashp2p.infinitebuffer.com/ktor/peers')
-        .then(res => res.json())
-        .then(peers => {
-            peers.forEach(peerId => {
-                if (peerId !== peer.id && !connections.has(peerId)) {
-                    const conn = peer.connect(peerId);
-                    setupConnection(conn, peerId);
-                }
-            });
-        });
 }
 
 // Setup peer-peer

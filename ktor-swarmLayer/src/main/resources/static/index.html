@@ -21,15 +21,19 @@
   <select id="mpd-select">
 
     <option value="https://dashp2p.infinitebuffer.com/ktor/sprite/sprite.mpd">
-        Sprite (dashp2p demo)
+      Sprite (dashp2p)
+    </option>
+
+    <option value="https://dashp2p.infinitebuffer.com/ktor/hero/hero.mpd">
+      Hero (dashp2p)
     </option>
 
     <option value="https://dash.akamaized.net/envivio/EnvivioDash3/manifest.mpd">
-      Envivio MultiRate (VOD)
+      Random 1 (akamai)
     </option>
 
     <option value="https://dash.akamaized.net/dash264/TestCasesIOP33/adapatationSetSwitching/5/manifest.mpd">
-      Akamai AdaptationSet Switching (VOD)
+      Random 2 (akamai)
     </option>
 
 
@@ -70,7 +74,7 @@
         await loadSelected();
 
         // Cambiar al seleccionar otra MPD
-        select.addEventListener('change', loadSelected);
+        select.addEventListener('change', () => {loadSelected(); setInfo();});
       } else {
         console.error('Shaka Player no es compatible con este navegador.');
       }

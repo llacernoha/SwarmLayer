@@ -117,6 +117,8 @@
   // Column widths (shared header + rows)
   const COL_TIME   = 10; // [HH:MM:SS]
   const COL_SRC    = 6;  // HTTP/P2P
+  const COL_PTYPE  = 3;   // type del peer (0,1,2...)
+  const COL_PGROUP = 4;   // group del peer (00,01,10...)
   const COL_SENDER = 45; // sender id
   const COL_RECEIV = 45; // receiver id
   const COL_SIZE   = 10; // size
@@ -148,13 +150,16 @@
   // --- Header (same alignment as rows) ---
   function headerText(){
     const h1 = padEnd('time',    COL_TIME);
-    const h2 = padEnd('type',    COL_SRC);
+    const h2 = padEnd('source', COL_SRC);       // HTTP/P2P
+    const h2t = padEnd('t', COL_PTYPE);      // type del peer
+    const h2g = padEnd('g', COL_PGROUP);     // grupo del peer
     const h3 = padEnd('sender',  COL_SENDER);
     const h4 = padEnd('receiver',COL_RECEIV);
     const h5 = padEnd('size',    COL_SIZE); // left-aligned
     const h6 = padEnd('peers',   COL_PEERS); // all/have
     const h7 = '  fragment';
-    return `${h1}  ${h2}  ${h3}  ${h4}  ${h5}  ${h6}${h7}`;
+    return `${h1}  ${h2} ${h2t}${h2g}  ${h3}  ${h4}  ${h5}  ${h6}${h7}`;
+
   }
 
   // --- Row formatting ---
@@ -163,6 +168,9 @@
     const srcRaw   = (m.source || '').toUpperCase();
     const srcLower = (m.source || '').toLowerCase();
     const srcClass = srcLower === 'http' ? 'http' : 'p2p';
+    const typeStr  = (m.type ?? '').toString();
+    const groupStr = (m.groupId ?? '').toString();
+
     const sender   = srcLower === 'http' ? '-' : (m.sender || '-');
     const receiver = m.receiver || '-';
     const sizeVal  = fmtBytes(m.sizeBytes);
@@ -215,18 +223,25 @@
     const peersColHtml = peersHtmlPieces.join('') + ' '.repeat(extraSpaces);
 
     // --- resto de columnas ---
-    const c1 = padEnd(time,      COL_TIME);
+    const c1 = padEnd(time, COL_TIME);
+
     const srcPad = ' '.repeat(Math.max(0, COL_SRC - srcRaw.length));
     const c2 = `<span class="l ${srcClass}">${esc(srcRaw)}</span>${srcPad}`;
-    const c3 = padEnd(sender,    COL_SENDER);
-    const c4 = padEnd(receiver,  COL_RECEIV);
-    const c5 = padEnd(sizeVal,   COL_SIZE);
+
+    const c2t = padEnd(typeStr, COL_PTYPE);
+    const c2g = padEnd(groupStr, COL_PGROUP);
+
+    const c3 = padEnd(sender,   COL_SENDER);
+    const c4 = padEnd(receiver, COL_RECEIV);
+    const c5 = padEnd(sizeVal,  COL_SIZE);
+
 
     const c7 = `  ${frag}`;
 
     // peersColHtml ya lleva su propio padding a COL_PEERS
     const firstLine =
-            `${esc(c1)}  ${c2}  ${esc(c3)}  ${esc(c4)}  ${esc(c5)}  ${peersColHtml}${esc(c7)}`;
+            `${esc(c1)}  ${c2} ${esc(c2t)}${esc(c2g)}  ${esc(c3)}  ${esc(c4)}  ${esc(c5)}  ${peersColHtml}${esc(c7)}`;
+
 
     return firstLine;
   }
