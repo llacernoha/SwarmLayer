@@ -57,10 +57,6 @@
         const player = new shaka.Player();
         player.attach(video);
 
-        player.addEventListener('error', (event) => {
-          console.error('Error de Shaka Player:', event.detail);
-        });
-
         async function loadSelected() {
           try {
             await player.load(select.value);
