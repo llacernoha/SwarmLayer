@@ -5,77 +5,160 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>SwarmLayer · Shaka Player</title>
+
   <link rel="icon" href="data:," />
+
+  <!-- Bootstrap 5 -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+
   <script src="https://cdnjs.cloudflare.com/ajax/libs/shaka-player/4.9.2/shaka-player.compiled.js"></script>
   <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
   <script src="swarmLayer_pb.js"></script>
   <script src="peer.js"></script>
+
+  <style>
+    body {
+      padding: 20px;
+    }
+
+    .layout {
+      display: flex;
+      gap: 24px;
+      align-items: flex-start;
+    }
+
+    .video-panel {
+      flex: 0 0 640px;
+    }
+  </style>
 </head>
 
 <body>
 
-  <h1>SwarmLayer</h1>
-  <div>Mi ID: <span id="my-id">cargando...</span></div>
+  <div class="container-fluid">
 
-  <label for="mpd-select">Selecciona MPD:</label>
-  <select id="mpd-select">
+    <h1 class="mb-4">SwarmLayer</h1>
 
-    <option value="https://dashp2p.infinitebuffer.com/ktor/sprite/sprite.mpd">
-      Sprite (dashp2p)
-    </option>
+    <div class="layout">
 
-    <option value="https://dashp2p.infinitebuffer.com/ktor/hero/hero.mpd">
-      Hero (dashp2p)
-    </option>
+      <div class="flex-grow-1">
+        <div class="mb-3">
+          ID: <span id="my-id" class="fw-bold">cargando...</span>
+        </div>
+        <div class="mb-3">
+          <label for="mpd-input" class="form-label">MPD:</label>
+          <input list="mpd-list" id="mpd-input" class="form-control">
 
-    <option value="https://dash.akamaized.net/envivio/EnvivioDash3/manifest.mpd">
-      Random 1 (akamai)
-    </option>
+          <datalist id="mpd-list">
+            <option value="https://dashp2p.infinitebuffer.com/ktor/sprite/sprite.mpd">
+            <option value="https://dashp2p.infinitebuffer.com/ktor/hero/hero.mpd">
+            <option value="https://dash.akamaized.net/envivio/EnvivioDash3/manifest.mpd">
+            <option value="https://dash.akamaized.net/dash264/TestCasesIOP33/adapatationSetSwitching/5/manifest.mpd">
+          </datalist>
+        </div>
 
-    <option value="https://dash.akamaized.net/dash264/TestCasesIOP33/adapatationSetSwitching/5/manifest.mpd">
-      Random 2 (akamai)
-    </option>
+        <div class="mb-3">
+          <label for="group-input" class="form-label">Grupo:</label>
+          <input type="text" id="group-input" list="group-list" class="form-control">
 
+          <datalist id="group-list">
+            <option value="1">
+            <option value="2">
+            <option value="3">
+            <option value="4">
+          </datalist>
+        </div>
 
-  </select>
+        <div class="mt-3">
+          <button id="save-btn" class="btn btn-success">
+            Guardar
+          </button>
+          <button id="cancel-btn" class="btn btn-outline-secondary ms-2">
+            Cancelar
+          </button>
+          <button id="logs-btn" class="btn btn-primary ms-2">
+            Logs
+          </button>
+        </div>
 
+      </div>
 
+      <div class="video-panel">
+        <video id="video" width="640" controls autoplay class="border rounded"></video>
+      </div>
 
-  <br><br>
-  <video id="video" width="640" controls autoplay></video>
+    </div>
 
-  <footer style="margin-top:30px; text-align:center; font-family:sans-serif; color:#666;">
+  </div>
+
+  <footer class="text-center text-muted mt-4">
     Grupo de Comunicaciones Multimedia - iTEAM
   </footer>
 
   <script>
+    // Variables globales
+    window.mpd = "https://dashp2p.infinitebuffer.com/ktor/sprite/sprite.mpd";
+    window.group = "1";
+
     document.addEventListener('DOMContentLoaded', async () => {
       const video = document.getElementById('video');
-      const select = document.getElementById('mpd-select');
+      const mpdInput = document.getElementById('mpd-input');
+      const groupInput = document.getElementById('group-input');
+      const saveBtn = document.getElementById('save-btn');
+      const cancelBtn = document.getElementById('cancel-btn');
+      const logsBtn = document.getElementById('logs-btn');
 
-      if (shaka.Player.isBrowserSupported()) {
-        const player = new shaka.Player();
-        player.attach(video);
 
-        async function loadSelected() {
-          try {
-            await player.load(select.value);
-            console.log('Reproduciendo:', select.value);
-          } catch (error) {
-            console.error('No se pudo cargar el video:', error);
-          }
-        }
 
-        // Cargar el primero por defecto
-        await loadSelected();
+      // Inputs con el estado actual
+      mpdInput.value = mpd;
+      groupInput.value = group;
 
-        // Cambiar al seleccionar otra MPD
-        select.addEventListener('change', () => {loadSelected(); setInfo();});
-      } else {
-        console.error('Shaka Player no es compatible con este navegador.');
+      // Shaka Player
+      if (!shaka.Player.isBrowserSupported()) {
+        console.error("Shaka Player no soportado en este navegador");
+        return;
       }
 
+      const player = new shaka.Player(video);
+
+      // Carga inicial
+      try {
+        await player.load(mpd);
+      } catch (err) {
+        alert("No se pudo cargar el MPD inicial.");
+      }
+
+      // Guardar
+      saveBtn.addEventListener('click', async () => {
+        const newMpd = mpdInput.value.trim();
+        const newGroup = groupInput.value.trim() || group;
+
+        if (newMpd && newMpd !== mpd) {
+          try {
+            await player.load(newMpd);
+            mpd = newMpd;
+          } catch (err) {
+            alert("No se pudo cargar el MPD.");
+            return;
+          }
+        }
+        group = newGroup;
+        await setInfo();
+      });
+
+      // Cancelar
+      cancelBtn.addEventListener('click', () => {
+        mpdInput.value = mpd;
+        groupInput.value = group;
+      });
+
+      // Logs
+      logsBtn.addEventListener('click', () => {
+        window.open("https://dashp2p.infinitebuffer.com/frag.html", "_blank");
+      });
     });
+
   </script>
 
 </body>

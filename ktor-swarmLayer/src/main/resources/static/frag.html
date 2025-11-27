@@ -117,8 +117,8 @@
   // Column widths (shared header + rows)
   const COL_TIME   = 10; // [HH:MM:SS]
   const COL_SRC    = 6;  // HTTP/P2P
-  const COL_PTYPE  = 3;   // type del peer (0,1,2...)
-  const COL_PGROUP = 4;   // group del peer (00,01,10...)
+  const COL_PTYPE  = 10;   // type del peer (0,1,2...)
+  const COL_PGROUP = 10;   // group del peer (00,01,10...)
   const COL_SENDER = 45; // sender id
   const COL_RECEIV = 45; // receiver id
   const COL_SIZE   = 10; // size
@@ -151,8 +151,8 @@
   function headerText(){
     const h1 = padEnd('time',    COL_TIME);
     const h2 = padEnd('source', COL_SRC);       // HTTP/P2P
-    const h2t = padEnd('t', COL_PTYPE);      // type del peer
-    const h2g = padEnd('g', COL_PGROUP);     // grupo del peer
+    const h2t = padEnd('mpd', COL_PTYPE);      // type del peer
+    const h2g = padEnd('group', COL_PGROUP);     // grupo del peer
     const h3 = padEnd('sender',  COL_SENDER);
     const h4 = padEnd('receiver',COL_RECEIV);
     const h5 = padEnd('size',    COL_SIZE); // left-aligned
@@ -228,7 +228,23 @@
     const srcPad = ' '.repeat(Math.max(0, COL_SRC - srcRaw.length));
     const c2 = `<span class="l ${srcClass}">${esc(srcRaw)}</span>${srcPad}`;
 
-    const c2t = padEnd(typeStr, COL_PTYPE);
+    // MPD completa
+    const typeFull = (m.type ?? '').toString();
+
+    // solo lo que hay después de la última "/"
+    let typeShort = typeFull;
+    const lastSlash = typeFull.lastIndexOf('/');
+    if (lastSlash !== -1) {
+      typeShort = typeFull.slice(lastSlash + 1);
+    }
+
+    // si quieres, quitar también ".mpd"
+    if (typeShort.endsWith(".mpd")) {
+      typeShort = typeShort.slice(0, -4);
+    }
+
+    // aplicar padding
+    const c2t = padEnd(typeShort, COL_PTYPE);
     const c2g = padEnd(groupStr, COL_PGROUP);
 
     const c3 = padEnd(sender,   COL_SENDER);
@@ -239,11 +255,7 @@
     const c7 = `  ${frag}`;
 
     // peersColHtml ya lleva su propio padding a COL_PEERS
-    const firstLine =
-            `${esc(c1)}  ${c2} ${esc(c2t)}${esc(c2g)}  ${esc(c3)}  ${esc(c4)}  ${esc(c5)}  ${peersColHtml}${esc(c7)}`;
-
-
-    return firstLine;
+    return `${esc(c1)}  ${c2} ${esc(c2t)}${esc(c2g)}  ${esc(c3)}  ${esc(c4)}  ${esc(c5)}  ${peersColHtml}${esc(c7)}`;
   }
 
   // --- Render helper para aplicar zebra ---

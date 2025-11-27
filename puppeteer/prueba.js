@@ -2,7 +2,7 @@ import puppeteer from 'puppeteer';
 
 // Configuración fija y clara
 const APP_URL        = 'https://dashp2p.infinitebuffer.com/';
-const NUM_PEERS      = 5;      // cuántos peers abrir
+const NUM_PEERS      = 15;      // cuántos peers abrir
 const START_DELAY_MS = 3000;   // pausa entre peers (ms)
 const RUN_SECONDS    = 800;    // cuánto tiempo mantenerlos abiertos (s)
 

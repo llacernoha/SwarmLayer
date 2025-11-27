@@ -43,37 +43,6 @@ peer.on('open', async id => {
     await setInfo();
 
     setInterval(setInfo, SERVER_KEEPALIVE_INTERVAL);
-
-    // Ping-Pong entre peers
-    // setInterval(() => {
-    //     const now = Date.now();
-    //
-    //     connections.forEach((peerData, peerId) => {
-    //         if (peerData.conn.open) {
-    //             const pingMsg = new proto.ping();
-    //             pingMsg.setSecnumber(1);
-    //             const wrapper = new proto.swarmLayerMessage();
-    //             wrapper.setPing(pingMsg);
-    //             peerData.conn.send(wrapper.serializeBinary());
-    //         }
-    //
-    //         if (now - peerData.lastHeartbeat > HEARTBEAT_TIMEOUT) {
-    //             peerData.conn.close();
-    //         }
-    //
-    //         try {
-    //             const livePeers = Array.from(connections.keys());
-    //             navigator.serviceWorker.controller?.postMessage({
-    //                 type: 'live-peers',
-    //                 peers: livePeers
-    //             });
-    //         } catch (e) {
-    //             //
-    //         }
-    //
-    //     });
-    // }, HEARTBEAT_INTERVAL);
-
 });
 
 // Conexión entrante siendo conn el objeto PeerJS que representa DataChannel y conn.peer la id del peer remoto
@@ -84,10 +53,6 @@ async function setInfo() {
 
     if (!peer_id) return;  // asegurarnos de que el peer existe
 
-    // Obtener la MPD directamente del DOM sin funciones intermedias
-    const select = document.getElementById('mpd-select');
-    const mpd = select ? select.value : null;
-
     // Enviar la información al servidor
     try {
         const res = await fetch('https://dashp2p.infinitebuffer.com/ktor/set-info', {
@@ -95,7 +60,8 @@ async function setInfo() {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 id: peer_id,
-                mpd: mpd
+                mpd: mpd,
+                group: group
             })
         });
 
@@ -309,7 +275,7 @@ navigator.serviceWorker?.addEventListener('message', async (event) => {
             for (const value of connections.values()) {
                 value.conn.send(bin);
             }
-            //console.log(`${data.url}, http, -, ${peer_id}, ${Date.now()}, ${data.size}`);
+            console.log(`${data.url}, http, -, ${peer_id}, ${Date.now()}, ${data.size}`);
 
             await sendMetric({ fragmentUrl: data.url, source: 'http', sender: '', receiver: peer_id, time: Date.now(), sizeBytes: data.size, peersWith: data.peersWith, peersWithFragments: data.peersWithFragments });
             break;

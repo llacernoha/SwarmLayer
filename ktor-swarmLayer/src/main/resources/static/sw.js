@@ -12,7 +12,13 @@ function postMessage(data) {
 }
 self.addEventListener('fetch', event => {
     const url = event.request.url;
-    if (!url.includes('.m4s') && !url.includes('.mp4') ) return;
+    if (
+        !url.includes('.m4s') &&
+        !url.includes('.mp4') &&
+        !url.includes('.m4a') &&
+        !url.includes('.m4v')
+    ) return;
+    
 
     event.respondWith((async () => {
         const cache = await caches.open('video-fragments');
@@ -70,7 +76,7 @@ self.addEventListener('fetch', event => {
                 size = parseInt(contentLength, 10);
             } else {
                 // Si no viene del header, calcularlo
-                const buffer = await resp.clone().arrayBuffer(); 
+                const buffer = await resp.clone().arrayBuffer();
                 size = buffer.byteLength;
             }
             // Clonamos la respuesta ya que se consume y la necesitamos tanto para caché, calcular el tamaño y el return
