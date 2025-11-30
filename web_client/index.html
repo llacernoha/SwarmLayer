@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="es">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>SwarmLayer + QoE Estimation</title>
+
+  <link rel="icon" href="data:," />
+
+  <!-- Bootstrap CSS -->
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.5/dist/css/bootstrap.min.css" rel="stylesheet">
+
+  <!-- SwarmLayer CSS -->
+  <link rel="stylesheet" href="css/swarmlayer.css">
+
+  <!-- QoE CSS -->
+  <link rel="stylesheet" href="css/qoe.css">
+  <link rel="stylesheet" href="https://reference.dashif.org/dash.js/nightly/contrib/akamai/controlbar/controlbar.css">
+
+</head>
+
+<body>
+
+  <div class="container-fluid py-4">
+
+    <!-- SwarmLayer arriba -->
+    <h1 class="mb-4">SwarmLayer</h1>
+
+    <!-- SwarmLayer -->
+    <div class="layout mb-5">
+      <div class="flex-grow-1">
+
+        <div class="mb-3">
+          ID: <span id="my-id" class="fw-bold">cargando...</span>
+        </div>
+
+        <div class="mb-3">
+          <label for="mpd-input-sl" class="form-label">MPD:</label>
+          <input list="mpd-list-sl" id="mpd-input-sl" class="form-control">
+          <datalist id="mpd-list-sl">
+            <option value="https://dashp2p.infinitebuffer.com/ktor/sprite/sprite.mpd">
+            <option value="https://dashp2p.infinitebuffer.com/ktor/hero/hero.mpd">
+            <option value="https://dash.akamaized.net/envivio/EnvivioDash3/manifest.mpd">
+            <option value="https://dash.akamaized.net/akamai/bbb_30fps/bbb_30fps.mpd">
+          </datalist>
+        </div>
+
+        <div class="mb-3">
+          <label for="group-input-sl" class="form-label">Grupo:</label>
+          <input type="text" id="group-input-sl" list="group-list-sl" class="form-control">
+          <datalist id="group-list-sl">
+            <option value="1">
+            <option value="2">
+            <option value="3">
+            <option value="4">
+          </datalist>
+        </div>
+
+        <div class="mt-3">
+          <button id="save-btn-sl" class="btn btn-success">Guardar y Enviar</button>
+          <button id="cancel-btn-sl" class="btn btn-outline-secondary ms-2">Cancelar</button>
+          <button id="logs-btn-sl" class="btn btn-primary ms-2">Logs</button>
+        </div>
+      </div>
+
+      <!-- Vídeo compartido SwarmLayer + QoE (con controlbar) -->
+      <div class="video-panel">
+        <div class="videoContainer dash-video-player" id="videoContainer-qoe">
+          <video id="video-sl" preload="auto" autoplay></video>
+
+          <div id="videoController" class="video-controller unselectable">
+            <div id="playPauseBtn" class="btn-play-pause">
+              <span id="iconPlayPause" class="icon-play"></span>
+            </div>
+            <span id="videoTime" class="time-display">00:00:00</span>
+            <div id="fullscreenBtn" class="btn-fullscreen control-icon-layout">
+              <span class="icon-fullscreen-enter"></span>
+            </div>
+            <div id="bitrateListBtn" class="control-icon-layout">
+              <span class="icon-bitrate"></span>
+            </div>
+            <input type="range" id="volumebar" class="volumebar" value="1" min="0" max="1" step=".01" />
+            <div id="muteBtn" class="btn-mute control-icon-layout">
+              <span id="iconMute" class="icon-mute-off"></span>
+            </div>
+            <div id="trackSwitchBtn" class="control-icon-layout">
+              <span class="icon-tracks"></span>
+            </div>
+            <div id="captionBtn" class="btn-caption control-icon-layout">
+              <span class="icon-caption"></span>
+            </div>
+            <span id="videoDuration" class="duration-display">00:00:00</span>
+            <div class="seekContainer">
+              <div id="seekbar" class="seekbar seekbar-complete">
+                <div id="seekbar-buffer" class="seekbar seekbar-buffer"></div>
+                <div id="seekbar-play" class="seekbar seekbar-play"></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <hr class="my-5">
+
+    <!-- QoE: solo métricas (Events / Results) -->
+    <div class="qoe-section">
+
+      <div class="d-flex justify-content-start align-items-center gap-3 mb-4">
+        <h2 class="mb-0">QoE Estimator</h2>
+        <!-- Botón toggle habilitado / deshabilitado -->
+        <button id="qoe-toggle-btn" class="btn btn-sm btn-outline-secondary">
+          Disabled
+        </button>
+      </div>
+
+      <div class="app">
+        <div class="row g-4">
+
+          <div class="comments-events col-lg-5">
+            <h3>Events</h3>
+            <div class="events"></div>
+          </div>
+
+          <div class="comments-result col-lg-5">
+            <h3>Results</h3>
+            <div class="results"></div>
+          </div>
+
+        </div>
+      </div>
+    </div>
+
+
+    <footer class="text-center text-muted my-5">
+      Grupo de Comunicaciones Multimedia - iTEAM
+    </footer>
+
+  </div>
+
+  <!-- Bootstrap bundle -->
+  <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.5/dist/js/bootstrap.bundle.min.js"></script>
+
+  <!-- Dash.js (una sola vez, para ambos) -->
+  <script src="https://reference.dashif.org/dash.js/nightly/dist/modern/umd/dash.all.debug.js"></script>
+
+  <!-- SwarmLayer -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <script src="js/swarmlayer/swarmLayer_pb.js"></script>
+  <script src="js/swarmlayer/peer.js"></script>
+  <script src="js/player/player-sl.js"></script>
+
+  <!-- QoE Controlbar -->
+  <script src="https://reference.dashif.org/dash.js/nightly/contrib/akamai/controlbar/ControlBar.js"></script>
+
+  <!-- QoE -->
+  <script src="js/qoe/qoe.js"></script>
+
+</body>
+
+</html>

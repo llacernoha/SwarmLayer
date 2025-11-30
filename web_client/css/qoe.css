@@ -1,0 +1,29 @@
+.app {
+  width: 100%;
+}
+.dash-video-player {
+  position: relative;
+  width: 100%;
+}
+.dash-video-player video {
+  width: 100%;
+  height: auto;
+  border-radius: 0.5rem;
+}
+.comments-events,
+.comments-result {
+  border: 2px solid #0d6efd;
+  border-radius: 0.5rem;
+  padding: 1rem;
+  background: #fff;
+}
+.comments-events h3,
+.comments-result h3 {
+  text-align: center;
+  margin-bottom: 0.75rem;
+}
+.events,
+.results {
+  max-height: 260px;
+  overflow-y: auto;
+}

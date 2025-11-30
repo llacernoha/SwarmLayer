@@ -1,0 +1,12 @@
+body {
+  padding: 20px;
+}
+.layout {
+  display: flex;
+  gap: 24px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+}
+.video-panel {
+  flex: 0 0 640px;
+}
